@@ -30,7 +30,9 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-
+	w := Worker_{}
+	call("Coordinator.CreateWorker", &ExampleArgs{}, &w)
+	// fmt.Printf("workerID:%v,nummap:%v,numreduce:%v\n", w.WorkesrID, w.NumMap, w.NumReduce)
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
 	for {
@@ -40,7 +42,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			fmt.Println("Failed to request task from Coordinator.")
 			return
 		}
-
+		// fmt.Printf("Taskstatus:%v, Tasktype:%v,Filename:%v,Time:%v\n", task.Status, task.TaskType, task.Filename, task.AssignTime)
 		// 检查是否任务已完成
 		if task.Status == TaskStatusAccomplished {
 			fmt.Println("All tasks are completed.")
@@ -50,13 +52,16 @@ func Worker(mapf func(string, string) []KeyValue,
 		// 根据任务类型执行相应的 Map 或 Reduce 操作
 		switch task.TaskType {
 		case TaskTypeMap:
-			handleMapTask(&task, mapf)
+			w.handleMapTask(&task, mapf)
+			// 通知 Coordinator 当前任务已完成
+			call("Coordinator.TaskDone", &task, &ExampleReply{})
 		case TaskTypeReduce:
-			handleReduceTask(&task, reducef)
+			w.handleReduceTask(&task, reducef)
+			call("Coordinator.TaskDone", &task, &ExampleReply{})
+		case UnAssgined:
+			// time.Sleep(time.Second)
 		}
-
-		// 通知 Coordinator 当前任务已完成
-		call("Coordinator.TaskDone", &task, &ExampleReply{})
+		// fmt.Printf("Taskstatus:%v, Tasktype:%v,Filename:%v,Time:%v\n", task.Status, task.TaskType, task.Filename, task.AssignTime)
 
 		// 防止 Worker 过于频繁请求任务，适当等待
 		time.Sleep(time.Second)
@@ -112,7 +117,7 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 }
 
 // 处理 Map 任务
-func handleMapTask(task *Task, mapf func(string, string) []KeyValue) {
+func (w *Worker_) handleMapTask(task *Task, mapf func(string, string) []KeyValue) {
 	// 读取输入文件内容
 	file, err := os.Open(task.Filename)
 	if err != nil {
@@ -133,10 +138,10 @@ func handleMapTask(task *Task, mapf func(string, string) []KeyValue) {
 
 	for _, kv := range kva {
 		// 计算分区号
-		partition := ihash(kv.Key) % task.NumReduce
-
+		partition := ihash(kv.Key) % w.NumReduce
 		// 打开或创建分区文件
 		if _, ok := partitionFiles[partition]; !ok {
+			// filename := fmt.Sprintf("mr-%d-%d-%d", task.TaskID, partition, w.WorkerID)
 			filename := fmt.Sprintf("mr-%d-%d", task.TaskID, partition)
 			partitionFiles[partition], err = os.Create(filename)
 			if err != nil {
@@ -159,14 +164,23 @@ func handleMapTask(task *Task, mapf func(string, string) []KeyValue) {
 }
 
 // 处理 Reduce 任务
-func handleReduceTask(task *Task, reducef func(string, []string) string) {
+func (w *Worker_) handleReduceTask(task *Task, reducef func(string, []string) string) {
 	// 收集和读取分区文件
 	kvMap := make(map[string][]string)
-	for i := 0; i < task.NumMap; i++ {
+	for i := 0; i < w.NumMap; i++ {
+		// pattern := fmt.Sprintf("mr-%d-%d-*", i, task.TaskID)
+		// filename, _ := filepath.Glob(pattern)
+		// file, err := os.Open(filename[0])
 		filename := fmt.Sprintf("mr-%d-%d", i, task.TaskID)
 		file, err := os.Open(filename)
+
 		if err != nil {
-			log.Fatalf("Cannot open %v", filename)
+			if os.IsNotExist(err) {
+				continue
+			} else {
+				log.Fatalf("Cannot open %v", filename)
+			}
+			// log.Fatalf("Cannot open %v", filename)
 		}
 		dec := json.NewDecoder(file)
 
@@ -185,6 +199,13 @@ func handleReduceTask(task *Task, reducef func(string, []string) string) {
 	ofile, err := os.Create(oname)
 	if err != nil {
 		log.Fatalf("Cannot create %v", oname)
+	}
+
+	// 检查是否收集到任何数据，如果没有则创建一个空文件
+	if len(kvMap) == 0 {
+		// 无需写入任何内容，直接关闭文件即可
+		ofile.Close()
+		return
 	}
 
 	for key, values := range kvMap {
