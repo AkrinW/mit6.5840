@@ -2,6 +2,8 @@ package kvsrv
 
 // Put or Append
 type PutAppendArgs struct {
+	ClientId int64
+	// TranscationID int
 	Key   string
 	Value string
 	// You'll have to add definitions here.
@@ -14,10 +16,19 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
+	ClientId int64
+	// TranscationID int
 	Key string
 	// You'll have to add definitions here.
 }
 
 type GetReply struct {
 	Value string
+}
+
+type ReportArgs struct {
+	ClientId int64
+	// TranscationID int
+}
+type ReportReply struct {
 }
