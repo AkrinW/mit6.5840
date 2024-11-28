@@ -20,6 +20,7 @@ package raft
 import (
 	//	"bytes"
 
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -49,6 +50,12 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+const (
+	StateFollower  = 0
+	StateCandidate = 1
+	StateLeader    = 2
+)
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -60,23 +67,43 @@ type Raft struct {
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	term           int
-	isLeader       bool
-	isCandidate    bool
+	term  int
+	state int
+	// isLeader       bool
+	// isCandidate    bool
 	heartbeatTimer *time.Timer
 	voteTimer      *time.Timer
+	voteTo         int   //这一轮投票的对象,如果是-1,说明还没投票
+	voteBox        []int //投票箱,用来统计投票数
+}
+
+func randomVoteTimeout() time.Duration {
+	return time.Duration(500+rand.Int63()%500) * time.Millisecond
+}
+
+func (rf *Raft) resetVoteTimer() {
+	rf.voteTimer.Stop()
+	rf.voteTimer.Reset(randomVoteTimeout())
+}
+
+func randomHeartbeatTimeout() time.Duration {
+	return time.Duration(200+rand.Int63()%150) * time.Millisecond
+}
+
+func (rf *Raft) restHeartbeatTimer() {
+	rf.heartbeatTimer.Stop()
+	rf.heartbeatTimer.Reset(randomHeartbeatTimeout())
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
-	// Your code here (3A).
-	term = rf.term
-	isleader = rf.isLeader
-	return term, isleader
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// var term int
+	// var isleader bool
+	// // Your code here (3A).
+	return rf.term, rf.state == StateLeader
 }
 
 // save Raft's persistent state to stable storage,
@@ -182,12 +209,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-
+	rf.dead = 0
 	// Your initialization code here (3A, 3B, 3C).
 	rf.term = 0
-	rf.isLeader = false
-	rf.isCandidate = false
-
+	rf.state = StateFollower
+	// rf.isLeader = false
+	// rf.isCandidate = false
+	rf.voteTimer = time.NewTimer(randomVoteTimeout())
+	rf.heartbeatTimer = time.NewTimer(randomHeartbeatTimeout())
+	rf.voteTo = -1
+	rf.voteBox = make([]int, len(peers))
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
