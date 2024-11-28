@@ -2,7 +2,6 @@ package raft
 
 import (
 	"fmt"
-	"math/rand"
 	"time"
 )
 
@@ -20,6 +19,7 @@ type RequestVoteReply struct {
 	// Your data here (3A).
 	Me   int
 	Vote bool
+	Term int // 这个用于提示投票是哪次任期的
 }
 
 type HeartbeatsArgs struct {
@@ -28,25 +28,31 @@ type HeartbeatsArgs struct {
 }
 
 type HeartbeatsReply struct {
+	Term int // 返回自己的term给leader，如果leader发现自己落后了，就把自己变为follower
 }
+
+// 需要注意数据争用的问题，比较关键的数据类型每次读或写都需要加锁，保证原子性
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	reply.Me = rf.me
-	if rf.voteTo != -1 && args.Term <= rf.term {
-		fmt.Printf("me:%v refuse vote %v\n", rf.me, args.Me)
-		reply.Vote = false
-	} else {
-		fmt.Printf("me:%v vote %v\n", rf.me, args.Me)
-		reply.Vote = true
-		rf.mu.Lock()
+	reply.Term = args.Term
+	rf.mu.Lock()
+	if args.Term > rf.term || (rf.voteTo != -1 && args.Term == rf.term) {
 		rf.state = StateFollower
+		rf.term = args.Term
 		rf.voteTo = args.Me
-		// 注意锁的获取释放,因为go不会主动提示锁未释放
-		rf.mu.Unlock()
 		rf.heartbeatTimer.Stop()
 		rf.heartbeatTimer.Reset(randomVoteTimeout())
+		rf.mu.Unlock()
+		fmt.Printf("me:%v vote %v\n", rf.me, args.Me)
+		reply.Vote = true
+		// 注意锁的获取释放,因为go不会主动提示锁未释放
+	} else {
+		rf.mu.Unlock()
+		fmt.Printf("me:%v refuse vote %v\n", rf.me, args.Me)
+		reply.Vote = false
 	}
 }
 
@@ -89,15 +95,19 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		// ms := 50 + (rand.Int63() % 300)
+		// time.Sleep(time.Duration(ms) * time.Millisecond)
 		// fmt.Printf("me:%v state%v\n", rf.me, rf.state)
+		rf.mu.Lock()
 		switch rf.state {
 		case StateFollower:
+			rf.mu.Unlock()
 			rf.runFollower()
 		case StateCandidate:
+			rf.mu.Unlock()
 			rf.runCandidate()
 		case StateLeader:
+			rf.mu.Unlock()
 			rf.runLeader()
 		}
 
@@ -117,13 +127,14 @@ func (rf *Raft) runFollower() {
 func (rf *Raft) runCandidate() {
 	fmt.Printf("me:%v is candidate\n", rf.me)
 	rf.mu.Lock()
+	// 开始投票，初始化自己的选票状态
 	rf.term++
 	fmt.Printf("me:%v term%v\n", rf.me, rf.term)
 	rf.voteTo = rf.me
-	rf.voteBox[rf.me] = 1
-	fmt.Printf("me:%v vote to %v\n", rf.me, rf.voteTo)
+	rf.voteGets = 1
 	rf.mu.Unlock()
 
+	rf.resetVoteTimer()
 	// start vote
 	for i := range rf.peers {
 		if i == rf.me {
@@ -131,7 +142,6 @@ func (rf *Raft) runCandidate() {
 		}
 		go rf.startVote(i)
 	}
-	rf.resetVoteTimer()
 
 	<-rf.voteTimer.C
 	fmt.Printf("me:%v vote time out, check if leader\n", rf.me)
@@ -141,23 +151,13 @@ func (rf *Raft) runCandidate() {
 		fmt.Printf("me:%v become follower\n", rf.me)
 		return
 	}
-	sum := 0
-	for _, num := range rf.voteBox {
-		sum += num
-	}
-	if sum > len(rf.peers)/2 {
+	if rf.voteGets > len(rf.peers)/2 {
 		fmt.Printf("me:%v become leader\n", rf.me)
 		rf.state = StateLeader
-		for i := range rf.voteBox {
-			rf.voteBox[i] = 0
-		}
-		rf.voteTo = -1
 	} else {
 		fmt.Printf("me:%v vote failed\n", rf.me)
 		rf.state = StateFollower
-		for i := range rf.voteBox {
-			rf.voteBox[i] = 0
-		}
+		rf.restHeartbeatTimer()
 		rf.voteTo = -1
 	}
 }
@@ -170,16 +170,20 @@ func (rf *Raft) startVote(server int) {
 		ok = rf.sendRequestVote(server, &args, &reply)
 		time.Sleep(10 * time.Millisecond)
 	}
-	if reply.Vote {
-		rf.mu.Lock()
-		rf.voteBox[server] = 1
-		rf.mu.Unlock()
+	// 检查是不是无效票
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.state == StateCandidate && reply.Vote && reply.Term == rf.term {
+		rf.voteGets++
+		// 即时检查选票，如果当选立刻变成leader
+		if rf.voteGets > len(rf.peers)/2 {
+			rf.voteTimer.Reset(10 * time.Millisecond)
+		}
 	}
 }
 
 func (rf *Raft) runLeader() {
 	fmt.Printf("me:%v is leader\n", rf.me)
-	// start vote
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
@@ -190,24 +194,29 @@ func (rf *Raft) runLeader() {
 }
 
 func (rf *Raft) startHeartBeat(server int) {
-	args := HeartbeatsArgs{rf.me, rf.term}
-	reply := HeartbeatsReply{}
-	rf.peers[server].Call("Raft.HeartBeat", &args, &reply)
+	if rf.state == StateLeader {
+		args := HeartbeatsArgs{rf.me, rf.term}
+		reply := HeartbeatsReply{}
+		rf.peers[server].Call("Raft.HeartBeat", &args, &reply)
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		if reply.Term > rf.term {
+			rf.state = StateFollower
+			rf.term = reply.Term
+		}
+	}
 }
 
 func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.term > args.Term {
 		fmt.Printf("%v is old term leader, ignore\n", args.Me)
+		reply.Term = rf.term
 	} else {
 		// fmt.Printf("me:%v receive heartbeat\n", rf.me)
-		rf.mu.Lock()
 		rf.heartbeatTimer.Reset(randomHeartbeatTimeout())
 		rf.state = StateFollower
 		rf.term = args.Term
-		rf.voteTo = -1
-		for i := range rf.voteBox {
-			rf.voteBox[i] = 0
-		}
-		rf.mu.Unlock()
 	}
 }
