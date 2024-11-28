@@ -39,19 +39,19 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Me = rf.me
 	reply.Term = args.Term
 	rf.mu.Lock()
-	if args.Term > rf.term || (rf.voteTo != -1 && args.Term == rf.term) {
+	if args.Term > rf.term || (rf.voteTo == -1 && args.Term == rf.term) {
 		rf.state = StateFollower
 		rf.term = args.Term
 		rf.voteTo = args.Me
 		rf.heartbeatTimer.Stop()
 		rf.heartbeatTimer.Reset(randomVoteTimeout())
 		rf.mu.Unlock()
-		fmt.Printf("me:%v vote %v\n", rf.me, args.Me)
+		fmt.Printf("me:%v vote %v, term%v\n", rf.me, args.Me, reply.Term)
 		reply.Vote = true
 		// 注意锁的获取释放,因为go不会主动提示锁未释放
 	} else {
 		rf.mu.Unlock()
-		fmt.Printf("me:%v refuse vote %v\n", rf.me, args.Me)
+		fmt.Printf("me:%v refuse vote %v, term%v\n", rf.me, args.Me, reply.Term)
 		reply.Vote = false
 	}
 }
@@ -110,7 +110,6 @@ func (rf *Raft) ticker() {
 			rf.mu.Unlock()
 			rf.runLeader()
 		}
-
 	}
 }
 
@@ -194,17 +193,19 @@ func (rf *Raft) runLeader() {
 }
 
 func (rf *Raft) startHeartBeat(server int) {
-	if rf.state == StateLeader {
-		args := HeartbeatsArgs{rf.me, rf.term}
-		reply := HeartbeatsReply{}
-		rf.peers[server].Call("Raft.HeartBeat", &args, &reply)
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		if reply.Term > rf.term {
-			rf.state = StateFollower
-			rf.term = reply.Term
-		}
+
+	rf.mu.Lock()
+	args := HeartbeatsArgs{rf.me, rf.term}
+	rf.mu.Unlock()
+	reply := HeartbeatsReply{}
+	rf.peers[server].Call("Raft.HeartBeat", &args, &reply)
+
+	rf.mu.Lock()
+	if reply.Term > rf.term {
+		rf.state = StateFollower
+		rf.term = reply.Term
 	}
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
