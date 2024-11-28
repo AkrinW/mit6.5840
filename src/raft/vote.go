@@ -162,7 +162,9 @@ func (rf *Raft) runCandidate() {
 }
 
 func (rf *Raft) startVote(server int) {
+	rf.mu.Lock()
 	args := RequestVoteArgs{rf.me, rf.term}
+	rf.mu.Unlock()
 	reply := RequestVoteReply{}
 	ok := false
 	for !ok {

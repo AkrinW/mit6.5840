@@ -75,6 +75,10 @@ type Raft struct {
 	voteTimer      *time.Timer
 	voteTo         int //这一轮投票的对象,如果是-1,说明还没投票
 	voteGets       int //这一轮获取的投票个数
+
+	logs       []LogEntry
+	matchIndex int //一致的log下标
+	nextIndex  int //下一个要写入的下标
 }
 
 func randomVoteTimeout() time.Duration {
@@ -197,6 +201,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.heartbeatTimer = time.NewTimer(randomHeartbeatTimeout())
 	rf.voteTo = -1
 	rf.voteGets = 0
+	rf.logs = []LogEntry{}
+	rf.matchIndex = -1
+	rf.nextIndex = 0
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 

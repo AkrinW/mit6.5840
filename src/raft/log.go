@@ -1,5 +1,11 @@
 package raft
 
+type LogEntry struct {
+	Command interface{}
+	Term    int
+	Index   int
+}
+
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -13,11 +19,16 @@ package raft
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	// index := -1
+	// term := -1
+	// isLeader := true
 
 	// Your code here (3B).
+	rf.mu.Lock()
+	if rf.state != StateLeader {
+		return -1, -1, false
+	}
+	rf.mu.Unlock()
 
-	return index, term, isLeader
+	return index, rf.term, true
 }
