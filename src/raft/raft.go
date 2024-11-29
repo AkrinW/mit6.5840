@@ -67,36 +67,25 @@ type Raft struct {
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	term  int
-	state int
-	// isLeader       bool
-	// isCandidate    bool
+	term           int
+	state          int
+	serverNum      int
 	heartbeatTimer *time.Timer
 	voteTimer      *time.Timer
 	voteTo         int //这一轮投票的对象,如果是-1,说明还没投票
 	voteGets       int //这一轮获取的投票个数
 
-	logs       []LogEntry
-	matchIndex int //一致的log下标
-	nextIndex  int //下一个要写入的下标
+	applyCh     chan ApplyMsg
+	logs        []LogEntry // 存的logs
+	commitIndex int        //对于leader，表示自己已经提交到了第几个log
+	matchIndex  []int      //每个节点要存储与其他节点一致的log下标，但是只有当这个节点是leader时才有用
+	nextIndex   []int      //下一个要写入的下标
+	logTimer    *time.Timer
 }
 
-func randomVoteTimeout() time.Duration {
-	return time.Duration(500+rand.Int63()%500) * time.Millisecond
-}
-
-func (rf *Raft) resetVoteTimer() {
-	rf.voteTimer.Stop()
-	rf.voteTimer.Reset(randomVoteTimeout())
-}
-
-func randomHeartbeatTimeout() time.Duration {
-	return time.Duration(200+rand.Int63()%150) * time.Millisecond
-}
-
-func (rf *Raft) restHeartbeatTimer() {
-	rf.heartbeatTimer.Stop()
-	rf.heartbeatTimer.Reset(randomHeartbeatTimeout())
+func ResetTimer(t *time.Timer, a int, b int) {
+	t.Stop()
+	t.Reset(time.Duration(a+rand.Int()%b) * time.Millisecond)
 }
 
 // return currentTerm and whether this server
@@ -193,17 +182,22 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.dead = 0
 	// Your initialization code here (3A, 3B, 3C).
+	rf.serverNum = len(peers)
 	rf.term = 0
 	rf.state = StateFollower
-	// rf.isLeader = false
-	// rf.isCandidate = false
-	rf.voteTimer = time.NewTimer(randomVoteTimeout())
-	rf.heartbeatTimer = time.NewTimer(randomHeartbeatTimeout())
+	rf.voteTimer = time.NewTimer(0)
+	rf.heartbeatTimer = time.NewTimer(0)
+	ResetTimer(rf.heartbeatTimer, 200, 150)
 	rf.voteTo = -1
 	rf.voteGets = 0
+
+	rf.applyCh = applyCh
 	rf.logs = []LogEntry{}
-	rf.matchIndex = -1
-	rf.nextIndex = 0
+	rf.commitIndex = -1
+	rf.matchIndex = make([]int, rf.serverNum)
+	rf.nextIndex = make([]int, rf.serverNum)
+	rf.voteTimer = time.NewTimer(0)
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 

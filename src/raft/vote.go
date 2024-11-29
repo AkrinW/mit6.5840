@@ -43,8 +43,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.state = StateFollower
 		rf.term = args.Term
 		rf.voteTo = args.Me
-		rf.heartbeatTimer.Stop()
-		rf.heartbeatTimer.Reset(randomVoteTimeout())
+		ResetTimer(rf.heartbeatTimer, 500, 500)
 		rf.mu.Unlock()
 		fmt.Printf("me:%v vote %v, term%v\n", rf.me, args.Me, reply.Term)
 		reply.Vote = true
@@ -133,9 +132,9 @@ func (rf *Raft) runCandidate() {
 	rf.voteGets = 1
 	rf.mu.Unlock()
 
-	rf.resetVoteTimer()
+	ResetTimer(rf.voteTimer, 500, 500)
 	// start vote
-	for i := range rf.peers {
+	for i := 0; i < rf.serverNum; i++ {
 		if i == rf.me {
 			continue
 		}
@@ -150,13 +149,13 @@ func (rf *Raft) runCandidate() {
 		fmt.Printf("me:%v become follower\n", rf.me)
 		return
 	}
-	if rf.voteGets > len(rf.peers)/2 {
+	if rf.voteGets > rf.serverNum/2 {
 		fmt.Printf("me:%v become leader\n", rf.me)
 		rf.state = StateLeader
 	} else {
 		fmt.Printf("me:%v vote failed\n", rf.me)
 		rf.state = StateFollower
-		rf.restHeartbeatTimer()
+		ResetTimer(rf.heartbeatTimer, 200, 150)
 		rf.voteTo = -1
 	}
 }
@@ -169,7 +168,7 @@ func (rf *Raft) startVote(server int) {
 	ok := false
 	for !ok {
 		ok = rf.sendRequestVote(server, &args, &reply)
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 	// 检查是不是无效票
 	rf.mu.Lock()
@@ -177,7 +176,7 @@ func (rf *Raft) startVote(server int) {
 	if rf.state == StateCandidate && reply.Vote && reply.Term == rf.term {
 		rf.voteGets++
 		// 即时检查选票，如果当选立刻变成leader
-		if rf.voteGets > len(rf.peers)/2 {
+		if rf.voteGets > rf.serverNum/2 {
 			rf.voteTimer.Reset(10 * time.Millisecond)
 		}
 	}
@@ -185,7 +184,7 @@ func (rf *Raft) startVote(server int) {
 
 func (rf *Raft) runLeader() {
 	fmt.Printf("me:%v is leader\n", rf.me)
-	for i := range rf.peers {
+	for i := 0; i < rf.serverNum; i++ {
 		if i == rf.me {
 			continue
 		}
@@ -218,7 +217,7 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 		reply.Term = rf.term
 	} else {
 		// fmt.Printf("me:%v receive heartbeat\n", rf.me)
-		rf.heartbeatTimer.Reset(randomHeartbeatTimeout())
+		ResetTimer(rf.heartbeatTimer, 200, 150)
 		rf.state = StateFollower
 		rf.term = args.Term
 	}
