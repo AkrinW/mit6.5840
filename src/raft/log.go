@@ -131,7 +131,7 @@ func (rf *Raft) MatchLog(server int) {
 	matchIndex := rf.nextIndex - 1
 	curIndex := matchIndex
 	rf.mu.Unlock()
-	for matchIndex > -1 {
+	for matchIndex > 0 {
 		rf.mu.Lock()
 		args := CheckMatchLogArgs{rf.me, rf.term, rf.logs[matchIndex].Term, matchIndex}
 		rf.mu.Unlock()
