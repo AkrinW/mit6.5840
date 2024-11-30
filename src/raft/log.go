@@ -67,6 +67,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// isLeader := true
 
 	// Your code here (3B).
+	// fmt.Printf("me:%v Start %v\n", rf.me, command)
 	rf.mu.Lock()
 	if rf.state != StateLeader {
 		rf.mu.Unlock()
@@ -90,7 +91,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // 对于每次start，启动一个goroutine去同步logs，当一半以上都同步时，commit
 func (rf *Raft) syncLog(index int, term int) {
 	fmt.Printf("me:%v in term:%v start sync\n", rf.me, term)
-	ResetTimer(rf.logTimer, 500, 500)
+	ResetTimer(rf.logTimer, 300, 300)
 	for i := 0; i < rf.serverNum; i++ {
 		if i == rf.me {
 			continue
@@ -102,8 +103,12 @@ func (rf *Raft) syncLog(index int, term int) {
 	fmt.Printf("me:%v logtimeout,check if commit\n", rf.me)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	matchIndex := rf.matchIndex
+	// 注意不能直接赋值，会排序会影响原数组
+	matchIndex := make([]int, rf.serverNum)
+	copy(matchIndex, rf.matchIndex)
 	sort.Ints(matchIndex)
+	// fmt.Printf("sort:%v\n", matchIndex)
+	// fmt.Printf("rf.matchindex:%v\n", rf.matchIndex)
 	if matchIndex[rf.serverNum/2] < index {
 		// 未能让一半节点同步，认为自己已不是leader
 		fmt.Printf("me:%v less half followers\n", rf.me)
