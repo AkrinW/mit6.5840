@@ -79,7 +79,7 @@ type Raft struct {
 	logs        []LogEntry // 存的logs
 	commitIndex int        //对于leader，表示自己已经提交到了第几个log
 	matchIndex  []int      //每个节点要存储与其他节点一致的log下标，但是只有当这个节点是leader时才有用
-	nextIndex   []int      //下一个要写入的下标
+	nextIndex   int        //下一个要写入的下标
 	logTimer    *time.Timer
 }
 
@@ -185,18 +185,21 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.serverNum = len(peers)
 	rf.term = 0
 	rf.state = StateFollower
-	rf.voteTimer = time.NewTimer(0)
-	rf.heartbeatTimer = time.NewTimer(0)
+	rf.voteTimer = time.NewTimer(10000)
+	rf.voteTimer.Stop()
+	rf.heartbeatTimer = time.NewTimer(10000)
 	ResetTimer(rf.heartbeatTimer, 200, 150)
 	rf.voteTo = -1
 	rf.voteGets = 0
 
 	rf.applyCh = applyCh
 	rf.logs = []LogEntry{}
-	rf.commitIndex = -1
+	rf.logs = append(rf.logs, LogEntry{})
+	rf.commitIndex = 0
 	rf.matchIndex = make([]int, rf.serverNum)
-	rf.nextIndex = make([]int, rf.serverNum)
-	rf.voteTimer = time.NewTimer(0)
+	rf.nextIndex = 1
+	rf.logTimer = time.NewTimer(10000)
+	rf.logTimer.Stop()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

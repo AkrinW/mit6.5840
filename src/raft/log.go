@@ -2,24 +2,49 @@ package raft
 
 import (
 	"fmt"
+	"sort"
 	"time"
 )
 
 type LogEntry struct {
 	Command interface{}
 	Term    int
-	// Index   int
+	Index   int
 }
 
 type CheckMatchLogArgs struct {
-	Me   int
-	Term int
+	Me      int
+	CurTerm int
+	LogTerm int
+	Index   int
 }
 
 type CheckMatchLogReply struct {
-	Me         int
-	Term       int
-	MatchIndex int
+	Me      int
+	CurTerm int
+	IfMatch bool
+}
+
+type SyncLogEntryArgs struct {
+	Me      int
+	CurTerm int
+	Log     LogEntry
+}
+
+type SyncLogEntryReply struct {
+	Me      int
+	CurTerm int
+}
+
+type CommitLogArgs struct {
+	Me      int
+	CurTerm int
+	Index   int
+}
+
+type CommitLogReply struct {
+	Me      int
+	CurTerm int
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -47,21 +72,23 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.mu.Unlock()
 		return -1, -1, false
 	}
-	newlog := LogEntry{command, rf.term}
+	newlog := LogEntry{command, rf.term, rf.nextIndex}
+	rf.matchIndex[rf.me] = rf.nextIndex
+	rf.nextIndex++
 	rf.logs = append(rf.logs, newlog)
-	fmt.Printf("me:%v append log, len%v\n", rf.me, len(rf.logs))
-	index := len(rf.logs) - 1
-	term := rf.term
 	rf.mu.Unlock()
+	fmt.Printf("me:%v append log, term%v, index%v\n", rf.me, newlog.Term, newlog.Index)
+	// fmt.Printf("loginfo0:%v", rf.logs[0].Term)
+	index := newlog.Index
+	term := newlog.Term
 	// msg := ApplyMsg{CommandValid: true, CommandIndex: index, Command: command}
 	// rf.applyCh <- msg
-	// rf.nextIndex++
-	go rf.syncLog(term)
+	go rf.syncLog(index, term)
 	return index, term, true
 }
 
 // 对于每次start，启动一个goroutine去同步logs，当一半以上都同步时，commit
-func (rf *Raft) syncLog(term int) {
+func (rf *Raft) syncLog(index int, term int) {
 	fmt.Printf("me:%v in term:%v start sync\n", rf.me, term)
 	ResetTimer(rf.logTimer, 500, 500)
 	for i := 0; i < rf.serverNum; i++ {
@@ -73,35 +100,99 @@ func (rf *Raft) syncLog(term int) {
 
 	<-rf.logTimer.C
 	fmt.Printf("me:%v logtimeout,check if commit\n", rf.me)
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	matchIndex := rf.matchIndex
+	sort.Ints(matchIndex)
+	if matchIndex[rf.serverNum/2] < index {
+		// 未能让一半节点同步，认为自己已不是leader
+		fmt.Printf("me:%v less half followers\n", rf.me)
+		rf.state = StateFollower
+		ResetTimer(rf.heartbeatTimer, 200, 150)
+		return
+	}
+	// 获取一半同步，将自己commit
+	fmt.Printf("me:%v commit log[%v]\n", rf.me, index)
+	msg := ApplyMsg{CommandValid: true, CommandIndex: index, Command: rf.logs[index].Command}
+	rf.applyCh <- msg
+	// 通知其他可以commit的follower进行commit
+	for i := 0; i < rf.serverNum; i++ {
+		if i == rf.me || rf.matchIndex[i] < index {
+			continue
+		}
+		go rf.CommitLog(i, index)
+	}
 }
 
 func (rf *Raft) MatchLog(server int) {
 	// 先一个个往前遍历，寻找最后一个同步的节点
-
-	// 找到后，把后面的entrylog一个个传入，保证一致性
-
-	// 传完后，给leader发送信号，表示可以commit
+	// leader向follower从后往前发送index与term，找到第一个相同的。
 	rf.mu.Lock()
-	args := CheckMatchLogArgs{rf.me, rf.term}
+	matchIndex := rf.nextIndex - 1
+	curIndex := matchIndex
 	rf.mu.Unlock()
-	reply := CheckMatchLogReply{}
-	ok := false
-	for !ok {
-		ok = rf.sendMatchLog(server, &args, &reply)
-		time.Sleep(50 * time.Millisecond)
+	for matchIndex > -1 {
+		rf.mu.Lock()
+		args := CheckMatchLogArgs{rf.me, rf.term, rf.logs[matchIndex].Term, matchIndex}
+		rf.mu.Unlock()
+		reply := CheckMatchLogReply{}
+		ok := false
+		fmt.Printf("me:%v check server:%v's log[%v]\n", rf.me, server, args.Index)
+		for !ok {
+			ok = rf.sendMatchLog(server, &args, &reply)
+			time.Sleep(50 * time.Millisecond)
+		}
+
+		// 检查自己是否过时了
+		rf.mu.Lock()
+		if rf.term < reply.CurTerm {
+			fmt.Printf("me:%v is old term, change to follower\n", rf.me)
+			rf.term = reply.CurTerm
+			rf.state = StateFollower
+			ResetTimer(rf.heartbeatTimer, 200, 150)
+			rf.mu.Unlock()
+			return
+		}
+		rf.mu.Unlock()
+
+		if reply.IfMatch {
+			break
+		} else {
+			// 检查前一个index是否匹配
+			matchIndex--
+		}
 	}
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if reply.Term > rf.term {
-		// 自己处于低term
-		rf.term = reply.Term
-		rf.state = StateFollower
-		return
+	// 找到后，把后面的entrylog一个个传入，保证一致性
+	fmt.Printf("server%v's matchindex is %v\n", server, matchIndex)
+	for matchIndex < curIndex {
+		matchIndex++
+		rf.mu.Lock()
+		args := SyncLogEntryArgs{rf.me, rf.term, rf.logs[matchIndex]}
+		rf.mu.Unlock()
+		fmt.Printf("me:%v sync server%v's log[%v]\n", rf.me, server, matchIndex)
+		ok := false
+		reply := SyncLogEntryReply{}
+		for !ok {
+			ok = rf.sendSyncLog(server, &args, &reply)
+			time.Sleep(50 * time.Millisecond)
+		}
+
+		// 反复检查自己是否过时了
+		rf.mu.Lock()
+		if rf.term < reply.CurTerm {
+			fmt.Printf("me:%v is old term, change to follower\n", rf.me)
+			rf.term = reply.CurTerm
+			rf.state = StateFollower
+			ResetTimer(rf.heartbeatTimer, 200, 150)
+			rf.mu.Unlock()
+			return
+		}
+		// 传完后，给leader发送信号，表示可以commit
+		rf.matchIndex[server] = matchIndex
+		rf.mu.Unlock()
 	}
-	// if rf.state == StateLeader && reply.MatchIndex < rf.matchIndex {
-	// 	fmt.Printf("server%v is low matchindex\n", reply.Me)
-	// }
+
+	// leader commit完后 再要求各followercommit
 }
 
 func (rf *Raft) sendMatchLog(server int, args *CheckMatchLogArgs, reply *CheckMatchLogReply) bool {
@@ -112,17 +203,100 @@ func (rf *Raft) sendMatchLog(server int, args *CheckMatchLogArgs, reply *CheckMa
 func (rf *Raft) CheckMatchLog(args *CheckMatchLogArgs, reply *CheckMatchLogReply) {
 	// Your code here (3A, 3B).
 	reply.Me = rf.me
+	reply.CurTerm = args.CurTerm
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	reply.Term = rf.term
-	if args.Term < reply.Term {
+	if args.CurTerm < rf.term {
+		// old request , refuse
 		fmt.Printf("me:%v reci old leader check match,ignore\n", rf.me)
+		reply.CurTerm = rf.term
+		reply.IfMatch = false
 		return
 	}
 	rf.state = StateFollower
-	rf.term = args.Term
-	rf.heartbeatTimer.Stop()
-	rf.heartbeatTimer.Reset(randomHeartbeatTimeout())
-	// reply.MatchIndex = rf.matchIndex
-	fmt.Printf("me:%v reply matchindex:%v\n", rf.me, rf.matchIndex)
+	rf.term = args.CurTerm
+	ResetTimer(rf.heartbeatTimer, 200, 150)
+	if args.Index >= rf.nextIndex {
+		reply.IfMatch = false
+		fmt.Printf("me:%v dont get log[%v]\n", rf.me, args.Index)
+	} else if args.LogTerm != rf.logs[args.Index].Term {
+		reply.IfMatch = false
+		fmt.Printf("me:%v in log[%v] has diff term%v\n", rf.me, args.Index, rf.logs[args.Index].Term)
+	} else {
+		reply.IfMatch = true
+		fmt.Printf("me:%v in log[%v] is match\n", rf.me, args.Index)
+	}
+}
+
+func (rf *Raft) sendSyncLog(server int, args *SyncLogEntryArgs, reply *SyncLogEntryReply) bool {
+	ok := rf.peers[server].Call("Raft.SyncLog", args, reply)
+	return ok
+}
+
+func (rf *Raft) SyncLog(args *SyncLogEntryArgs, reply *SyncLogEntryReply) {
+	reply.Me = rf.me
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.CurTerm < rf.term {
+		// old request , refuse
+		fmt.Printf("me:%v reci old leader sync log,ignore\n", rf.me)
+		reply.CurTerm = rf.term
+		return
+	}
+	rf.state = StateFollower
+	rf.term = args.CurTerm
+	ResetTimer(rf.heartbeatTimer, 200, 150)
+	for rf.nextIndex <= args.Log.Index {
+		rf.logs = append(rf.logs, LogEntry{})
+		rf.nextIndex++
+	}
+	rf.logs[args.Log.Index] = args.Log
+	fmt.Printf("me:%v sync log[%v]\n", rf.me, args.Log.Index)
+}
+
+func (rf *Raft) CommitLog(server int, index int) {
+	rf.mu.Lock()
+	args := CommitLogArgs{rf.me, rf.term, index}
+	reply := CommitLogReply{}
+	rf.mu.Unlock()
+	ok := false
+	for !ok {
+		ok = rf.sendCommitLog(server, &args, &reply)
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// 检查自己是否过时了
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.term < reply.CurTerm {
+		fmt.Printf("me:%v is old term, change to follower\n", rf.me)
+		rf.term = reply.CurTerm
+		rf.state = StateFollower
+		ResetTimer(rf.heartbeatTimer, 200, 150)
+	}
+}
+
+func (rf *Raft) sendCommitLog(server int, args *CommitLogArgs, reply *CommitLogReply) bool {
+	ok := rf.peers[server].Call("Raft.FollowerCommitLog", args, reply)
+	return ok
+}
+
+func (rf *Raft) FollowerCommitLog(args *CommitLogArgs, reply *CommitLogReply) {
+	reply.Me = rf.me
+	reply.CurTerm = args.CurTerm
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.CurTerm < rf.term {
+		// old request , refuse
+		fmt.Printf("me:%v reci old leader commit log,ignore\n", rf.me)
+		reply.CurTerm = rf.term
+		return
+	}
+	rf.state = StateFollower
+	rf.term = args.CurTerm
+	ResetTimer(rf.heartbeatTimer, 200, 150)
+
+	fmt.Printf("me:%v commit log[%v]\n", rf.me, args.Index)
+	msg := ApplyMsg{CommandValid: true, CommandIndex: args.Index, Command: rf.logs[args.Index].Command}
+	rf.applyCh <- msg
 }
