@@ -76,12 +76,14 @@ type Raft struct {
 	voteGets       int  //这一轮获取的投票个数
 	ifstopvote     bool //是否停止选票，用来防止过多timer到时提醒
 
-	applyCh     chan ApplyMsg
-	logs        []LogEntry // 存的logs
+	applyCh chan ApplyMsg
+	logs    []LogEntry // 存的logs
+	// tmplogterm  int        //临时log对应的term，match一半重连后term必定改变，用这个重置term状态
+	tmplogs     []LogEntry // Matchlog时存储的临时log文件
 	commitIndex int        //对于leader，表示自己已经提交到了第几个log
 	matchIndex  []int      //每个节点要存储与其他节点一致的log下标，但是只有当这个节点是leader时才有用
 	nextIndex   int        //下一个要写入的下标
-	logTimer    *time.Timer
+	// logTimer    *time.Timer
 }
 
 func ResetTimer(t *time.Timer, a int32, b int32) {
@@ -200,8 +202,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.matchIndex = make([]int, rf.serverNum)
 	rf.nextIndex = 1
-	rf.logTimer = time.NewTimer(10000 * time.Millisecond)
-	rf.logTimer.Stop()
+	// rf.logTimer = time.NewTimer(10000 * time.Millisecond)
+	// rf.logTimer.Stop()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

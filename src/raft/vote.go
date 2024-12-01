@@ -11,7 +11,7 @@ type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
 	Me   int
 	Term int
-	// 投票时发送自己已提交的和log长度。
+	// 投票时发送自己已提交的index和log长度。
 	CommitIndex int
 	Index       int
 }
@@ -26,14 +26,19 @@ type RequestVoteReply struct {
 }
 
 type HeartbeatsArgs struct {
-	Me   int
-	Term int
+	Me          int
+	Term        int
+	CommitIndex int //心跳发送leader已commit节点
+	CommitTerm  int
+	CurIndex    int //心跳发送当前最新节点
+	CurTerm     int
 }
 
 type HeartbeatsReply struct {
 	Me          int
-	Term        int // 返回自己的term给leader，如果leader发现自己落后了，就把自己变为follower
-	CommitIndex int // 返回自己的commitindex，给leader检查
+	Term        int  // 返回自己的term给leader，如果leader发现自己落后了，就把自己变为follower
+	CommitIndex int  // 返回自己的commitindex，给leader检查
+	IfNeedMatch bool // 返回自己是否需要同步
 }
 
 // 需要注意数据争用的问题，比较关键的数据类型每次读或写都需要加锁，保证原子性
@@ -120,11 +125,23 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Me = rf.me
 	reply.Term = args.Term
 	rf.mu.Lock()
-	// 重新修改投票逻辑，先看任期，再看log长度，最后看是否已经投票
-	if args.Term < rf.term || args.Index < rf.nextIndex {
+	// 重新修改投票逻辑，先看任期，再看已commit长度，再看log长度，最后看是否已经投票
+	if args.Term < rf.term {
 		rf.mu.Unlock()
 		reply.Vote = false
-		fmt.Printf("me:%v refuse vote %v, term%v, old term or index\n", rf.me, args.Me, reply.Term)
+		fmt.Printf("me:%v refuse vote %v, term%v, old term\n", rf.me, args.Me, reply.Term)
+		return
+	}
+	if args.CommitIndex < rf.commitIndex {
+		rf.term = args.Term
+		rf.mu.Unlock()
+		reply.Vote = false
+		fmt.Printf("me:%v refuse vote %v, term%v, old commit\n", rf.me, args.Me, reply.Term)
+	} else if args.CommitIndex == rf.commitIndex && args.Index < rf.nextIndex {
+		rf.term = args.Term
+		rf.mu.Unlock()
+		reply.Vote = false
+		fmt.Printf("me:%v refuse vote %v, term%v, old log index\n", rf.me, args.Me, reply.Term)
 	} else {
 		if rf.voteTo != -1 && args.Term == rf.term {
 			rf.mu.Unlock()
@@ -190,7 +207,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) startVote(server int) {
 	rf.mu.Lock()
-	args := RequestVoteArgs{rf.me, rf.term, rf.nextIndex}
+	args := RequestVoteArgs{rf.me, rf.term, rf.commitIndex, rf.nextIndex}
 	rf.mu.Unlock()
 	reply := RequestVoteReply{}
 	ok := rf.sendRequestVote(server, &args, &reply)
@@ -226,12 +243,15 @@ func (rf *Raft) runLeader() {
 
 func (rf *Raft) startHeartBeat(server int) {
 	rf.mu.Lock()
-	args := HeartbeatsArgs{rf.me, rf.term}
+	args := HeartbeatsArgs{rf.me, rf.term, rf.commitIndex, rf.logs[rf.commitIndex].Term, rf.nextIndex - 1, rf.logs[rf.nextIndex-1].Term}
 	rf.mu.Unlock()
 	reply := HeartbeatsReply{}
 	// leader向follower发送自己的commit与logindex，让follower知道自己是否落后
-	rf.peers[server].Call("Raft.HeartBeat", &args, &reply)
-
+	ok := rf.peers[server].Call("Raft.HeartBeat", &args, &reply)
+	if !ok {
+		// fmt.Printf("server%v unconnect, return\n", server)
+		return
+	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if reply.Term > rf.term {
@@ -241,16 +261,22 @@ func (rf *Raft) startHeartBeat(server int) {
 		return
 	}
 	// 检查reply的commit，如果落后，就让它进行更新
-	if reply.CommitIndex < rf.commitIndex {
-		go rf.HeartCommitLog(server, reply.CommitIndex, rf.commitIndex)
-	} else if rf.matchIndex[server] < rf.nextIndex-1 {
-		// 要求follower先完成之前的commit，再进行logentry复制
+	if reply.IfNeedMatch {
 		go rf.MatchLog(server)
+	} else {
+		rf.matchIndex[server] = rf.nextIndex - 1
 	}
+	// if reply.CommitIndex < rf.commitIndex {
+	// 	go rf.HeartCommitLog(server, reply.CommitIndex, rf.commitIndex)
+	// } else if rf.matchIndex[server] < rf.nextIndex-1 {
+	// 	// 要求follower先完成之前的commit，再进行logentry复制
+	// 	go rf.MatchLog(server)
+	// }
 }
 
 func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 	reply.Me = rf.me
+	reply.IfNeedMatch = false
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.term > args.Term {
@@ -261,6 +287,16 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 		ResetTimer(rf.heartbeatTimer, 200, 150)
 		rf.state = StateFollower
 		rf.term = args.Term
-		reply.CommitIndex = rf.commitIndex
+		if args.CurIndex > rf.nextIndex-1 || args.CurTerm != rf.logs[args.CurIndex].Term {
+			reply.IfNeedMatch = true
+		}
+		if args.CommitIndex < rf.nextIndex && args.CommitTerm == rf.logs[args.CommitIndex].Term {
+			for rf.commitIndex < args.CommitIndex {
+				rf.commitIndex++
+				fmt.Printf("me:%v commit log[%v]\n", rf.me, rf.commitIndex)
+				msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex].Command}
+				rf.applyCh <- msg
+			}
+		}
 	}
 }
