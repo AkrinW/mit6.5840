@@ -571,6 +571,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			}
 			cfg.mu.Unlock()
 			if rf != nil {
+				fmt.Printf("time:%v rf:%v Start cmd%v\n", time.Now(), starts, cmd)
 				index1, _, ok := rf.Start(cmd)
 				if ok {
 					index = index1
@@ -583,6 +584,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
+			// 限制2秒钟时间commit当前log
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
 				if nd > 0 && nd >= expectedServers {

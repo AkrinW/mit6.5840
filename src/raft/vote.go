@@ -11,6 +11,9 @@ type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
 	Me   int
 	Term int
+	// 投票时发送自己已提交的和log长度。
+	CommitIndex int
+	Index       int
 }
 
 // example RequestVote RPC reply structure.
@@ -28,10 +31,88 @@ type HeartbeatsArgs struct {
 }
 
 type HeartbeatsReply struct {
-	Term int // 返回自己的term给leader，如果leader发现自己落后了，就把自己变为follower
+	Me          int
+	Term        int // 返回自己的term给leader，如果leader发现自己落后了，就把自己变为follower
+	CommitIndex int // 返回自己的commitindex，给leader检查
 }
 
 // 需要注意数据争用的问题，比较关键的数据类型每次读或写都需要加锁，保证原子性
+func (rf *Raft) ticker() {
+	for !rf.killed() {
+		// Your code here (3A)
+		// Check if a leader election should be started.
+
+		// pause for a random amount of time between 50 and 350
+		// milliseconds.
+		// ms := 50 + (rand.Int63() % 300)
+		// time.Sleep(time.Duration(ms) * time.Millisecond)
+		// fmt.Printf("me:%v state%v\n", rf.me, rf.state)
+		rf.mu.Lock()
+		state := rf.state
+		rf.mu.Unlock()
+		switch state {
+		case StateFollower:
+			rf.runFollower()
+		case StateCandidate:
+			rf.runCandidate()
+		case StateLeader:
+			rf.runLeader()
+		}
+	}
+}
+
+func (rf *Raft) runFollower() {
+	fmt.Printf("me:%v is follower\n", rf.me)
+
+	<-rf.heartbeatTimer.C
+	fmt.Printf("me:%v heartbeater timeout\n", rf.me)
+	rf.mu.Lock()
+	rf.state = StateCandidate
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) runCandidate() {
+	fmt.Printf("me:%v is candidate\n", rf.me)
+	rf.mu.Lock()
+	// 开始投票，初始化自己的选票状态
+	rf.term++
+	fmt.Printf("me:%v term%v\n", rf.me, rf.term)
+	rf.voteTo = rf.me
+	rf.voteGets = 1
+	rf.ifstopvote = false
+	rf.mu.Unlock()
+
+	ResetTimer(rf.voteTimer, 500, 500)
+	// start vote
+	for i := 0; i < rf.serverNum; i++ {
+		if i == rf.me {
+			continue
+		}
+		go rf.startVote(i)
+	}
+
+	<-rf.voteTimer.C
+	fmt.Printf("me:%v vote time out, check if leader\n", rf.me)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.ifstopvote = false
+	if rf.state == StateFollower {
+		fmt.Printf("me:%v become follower\n", rf.me)
+		return
+	}
+	if rf.voteGets > rf.serverNum/2 {
+		fmt.Printf("me:%v become leader\n", rf.me)
+		rf.state = StateLeader
+		// 变为leader后，启动一个goroutine检查是否进行commit
+		// 这个routine会在rf变为follower后停止
+		go rf.commiter()
+	} else {
+		fmt.Printf("me:%v vote failed\n", rf.me)
+		rf.state = StateFollower
+		ResetTimer(rf.heartbeatTimer, 200, 150)
+		rf.voteTo = -1
+	}
+}
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -39,20 +120,40 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Me = rf.me
 	reply.Term = args.Term
 	rf.mu.Lock()
-	if args.Term > rf.term || (rf.voteTo == -1 && args.Term == rf.term) {
-		rf.state = StateFollower
-		rf.term = args.Term
-		rf.voteTo = args.Me
-		ResetTimer(rf.heartbeatTimer, 500, 500)
+	// 重新修改投票逻辑，先看任期，再看log长度，最后看是否已经投票
+	if args.Term < rf.term || args.Index < rf.nextIndex {
 		rf.mu.Unlock()
-		fmt.Printf("me:%v vote %v, term%v\n", rf.me, args.Me, reply.Term)
-		reply.Vote = true
-		// 注意锁的获取释放,因为go不会主动提示锁未释放
-	} else {
-		rf.mu.Unlock()
-		fmt.Printf("me:%v refuse vote %v, term%v\n", rf.me, args.Me, reply.Term)
 		reply.Vote = false
+		fmt.Printf("me:%v refuse vote %v, term%v, old term or index\n", rf.me, args.Me, reply.Term)
+	} else {
+		if rf.voteTo != -1 && args.Term == rf.term {
+			rf.mu.Unlock()
+			reply.Vote = false
+			fmt.Printf("me:%v in term%v already voted\n", rf.me, reply.Term)
+		} else {
+			rf.state = StateFollower
+			rf.term = args.Term
+			rf.voteTo = args.Me
+			ResetTimer(rf.heartbeatTimer, 300, 150)
+			rf.mu.Unlock()
+			fmt.Printf("me:%v vote %v, term%v\n", rf.me, args.Me, reply.Term)
+			reply.Vote = true
+		}
 	}
+	// if args.Term > rf.term || (rf.voteTo == -1 && args.Term == rf.term) {
+	// 	rf.state = StateFollower
+	// 	rf.term = args.Term
+	// 	rf.voteTo = args.Me
+	// 	ResetTimer(rf.heartbeatTimer, 500, 500)
+	// 	rf.mu.Unlock()
+	// 	fmt.Printf("me:%v vote %v, term%v\n", rf.me, args.Me, reply.Term)
+	// 	reply.Vote = true
+	// 	// 注意锁的获取释放,因为go不会主动提示锁未释放
+	// } else {
+	// 	rf.mu.Unlock()
+	// 	fmt.Printf("me:%v refuse vote %v, term%v\n", rf.me, args.Me, reply.Term)
+	// 	reply.Vote = false
+	// }
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -87,88 +188,17 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-func (rf *Raft) ticker() {
-	for !rf.killed() {
-		// Your code here (3A)
-		// Check if a leader election should be started.
-
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		// ms := 50 + (rand.Int63() % 300)
-		// time.Sleep(time.Duration(ms) * time.Millisecond)
-		// fmt.Printf("me:%v state%v\n", rf.me, rf.state)
-		rf.mu.Lock()
-		switch rf.state {
-		case StateFollower:
-			rf.mu.Unlock()
-			rf.runFollower()
-		case StateCandidate:
-			rf.mu.Unlock()
-			rf.runCandidate()
-		case StateLeader:
-			rf.mu.Unlock()
-			rf.runLeader()
-		}
-	}
-}
-
-func (rf *Raft) runFollower() {
-	fmt.Printf("me:%v is follower\n", rf.me)
-
-	<-rf.heartbeatTimer.C
-	fmt.Printf("me:%v heartbeater timeout\n", rf.me)
-	rf.mu.Lock()
-	rf.state = StateCandidate
-	rf.mu.Unlock()
-}
-
-func (rf *Raft) runCandidate() {
-	fmt.Printf("me:%v is candidate\n", rf.me)
-	rf.mu.Lock()
-	// 开始投票，初始化自己的选票状态
-	rf.term++
-	fmt.Printf("me:%v term%v\n", rf.me, rf.term)
-	rf.voteTo = rf.me
-	rf.voteGets = 1
-	rf.mu.Unlock()
-
-	ResetTimer(rf.voteTimer, 500, 500)
-	// start vote
-	for i := 0; i < rf.serverNum; i++ {
-		if i == rf.me {
-			continue
-		}
-		go rf.startVote(i)
-	}
-
-	<-rf.voteTimer.C
-	fmt.Printf("me:%v vote time out, check if leader\n", rf.me)
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if rf.state == StateFollower {
-		fmt.Printf("me:%v become follower\n", rf.me)
-		return
-	}
-	if rf.voteGets > rf.serverNum/2 {
-		fmt.Printf("me:%v become leader\n", rf.me)
-		rf.state = StateLeader
-	} else {
-		fmt.Printf("me:%v vote failed\n", rf.me)
-		rf.state = StateFollower
-		ResetTimer(rf.heartbeatTimer, 200, 150)
-		rf.voteTo = -1
-	}
-}
-
 func (rf *Raft) startVote(server int) {
 	rf.mu.Lock()
-	args := RequestVoteArgs{rf.me, rf.term}
+	args := RequestVoteArgs{rf.me, rf.term, rf.nextIndex}
 	rf.mu.Unlock()
 	reply := RequestVoteReply{}
-	ok := false
-	for !ok {
-		ok = rf.sendRequestVote(server, &args, &reply)
-		time.Sleep(50 * time.Millisecond)
+	ok := rf.sendRequestVote(server, &args, &reply)
+	if !ok {
+		// send失败在test中说明对方断连了，直接中止代码
+		return
+		// ok = rf.sendRequestVote(server, &args, &reply)
+		// time.Sleep(50 * time.Millisecond)
 	}
 	// 检查是不是无效票
 	rf.mu.Lock()
@@ -176,8 +206,9 @@ func (rf *Raft) startVote(server int) {
 	if rf.state == StateCandidate && reply.Vote && reply.Term == rf.term {
 		rf.voteGets++
 		// 即时检查选票，如果当选立刻变成leader
-		if rf.voteGets > rf.serverNum/2 {
-			rf.voteTimer.Reset(10 * time.Millisecond)
+		if rf.voteGets > rf.serverNum/2 && !rf.ifstopvote {
+			rf.voteTimer.Reset(10 * time.Microsecond)
+			rf.ifstopvote = true
 		}
 	}
 }
@@ -194,22 +225,32 @@ func (rf *Raft) runLeader() {
 }
 
 func (rf *Raft) startHeartBeat(server int) {
-
 	rf.mu.Lock()
 	args := HeartbeatsArgs{rf.me, rf.term}
 	rf.mu.Unlock()
 	reply := HeartbeatsReply{}
+	// leader向follower发送自己的commit与logindex，让follower知道自己是否落后
 	rf.peers[server].Call("Raft.HeartBeat", &args, &reply)
 
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if reply.Term > rf.term {
 		rf.state = StateFollower
+		ResetTimer(rf.heartbeatTimer, 200, 150)
 		rf.term = reply.Term
+		return
 	}
-	rf.mu.Unlock()
+	// 检查reply的commit，如果落后，就让它进行更新
+	if reply.CommitIndex < rf.commitIndex {
+		go rf.HeartCommitLog(server, reply.CommitIndex, rf.commitIndex)
+	} else if rf.matchIndex[server] < rf.nextIndex-1 {
+		// 要求follower先完成之前的commit，再进行logentry复制
+		go rf.MatchLog(server)
+	}
 }
 
 func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
+	reply.Me = rf.me
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.term > args.Term {
@@ -220,5 +261,6 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 		ResetTimer(rf.heartbeatTimer, 200, 150)
 		rf.state = StateFollower
 		rf.term = args.Term
+		reply.CommitIndex = rf.commitIndex
 	}
 }

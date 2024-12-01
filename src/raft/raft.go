@@ -68,12 +68,13 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	term           int
-	state          int
+	state          int32
 	serverNum      int
 	heartbeatTimer *time.Timer
 	voteTimer      *time.Timer
-	voteTo         int //这一轮投票的对象,如果是-1,说明还没投票
-	voteGets       int //这一轮获取的投票个数
+	voteTo         int  //这一轮投票的对象,如果是-1,说明还没投票
+	voteGets       int  //这一轮获取的投票个数
+	ifstopvote     bool //是否停止选票，用来防止过多timer到时提醒
 
 	applyCh     chan ApplyMsg
 	logs        []LogEntry // 存的logs
@@ -83,9 +84,10 @@ type Raft struct {
 	logTimer    *time.Timer
 }
 
-func ResetTimer(t *time.Timer, a int, b int) {
+func ResetTimer(t *time.Timer, a int32, b int32) {
 	t.Stop()
-	t.Reset(time.Duration(a+rand.Int()%b) * time.Millisecond)
+	ms := a + (rand.Int31() % b)
+	t.Reset(time.Duration(ms) * time.Millisecond)
 }
 
 // return currentTerm and whether this server
@@ -185,9 +187,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.serverNum = len(peers)
 	rf.term = 0
 	rf.state = StateFollower
-	rf.voteTimer = time.NewTimer(10000)
+	rf.voteTimer = time.NewTimer(10000 * time.Millisecond)
 	rf.voteTimer.Stop()
-	rf.heartbeatTimer = time.NewTimer(10000)
+	rf.heartbeatTimer = time.NewTimer(10000 * time.Millisecond)
 	ResetTimer(rf.heartbeatTimer, 200, 150)
 	rf.voteTo = -1
 	rf.voteGets = 0
@@ -198,7 +200,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.matchIndex = make([]int, rf.serverNum)
 	rf.nextIndex = 1
-	rf.logTimer = time.NewTimer(10000)
+	rf.logTimer = time.NewTimer(10000 * time.Millisecond)
 	rf.logTimer.Stop()
 
 	// initialize from state persisted before a crash

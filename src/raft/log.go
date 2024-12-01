@@ -78,14 +78,46 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.nextIndex++
 	rf.logs = append(rf.logs, newlog)
 	rf.mu.Unlock()
-	fmt.Printf("me:%v append log, term%v, index%v\n", rf.me, newlog.Term, newlog.Index)
+	fmt.Printf("me:%v append log%v, term%v, index%v\n", rf.me, command, newlog.Term, newlog.Index)
 	// fmt.Printf("loginfo0:%v", rf.logs[0].Term)
 	index := newlog.Index
 	term := newlog.Term
 	// msg := ApplyMsg{CommandValid: true, CommandIndex: index, Command: command}
 	// rf.applyCh <- msg
-	go rf.syncLog(index, term)
+	// 在每次start后启动有点问题。需要修改一下逻辑
+	// test提供的等待时间是溢出的，只在选举稳定时进行log同步
+	// 利用heartbeat进行同步
+
+	// go rf.syncLog(index, term)
 	return index, term, true
+}
+
+func (rf *Raft) commiter() {
+	for !rf.killed() {
+		time.Sleep(500 * time.Millisecond)
+		rf.mu.Lock()
+		state := rf.state
+		rf.mu.Unlock()
+		if state != StateLeader {
+			return
+		}
+		// 先考虑不降级leader的情况
+		fmt.Printf("me:%v every0.5s check if commit\n", rf.me)
+		rf.mu.Lock()
+		matchIndex := make([]int, rf.serverNum)
+		copy(matchIndex, rf.matchIndex)
+		sort.Ints(matchIndex)
+		fmt.Printf("matchindex:%v\n", rf.matchIndex)
+		if matchIndex[rf.serverNum/2] <= rf.commitIndex {
+			fmt.Printf("no new commits\n")
+		} else {
+			rf.commitIndex++
+			msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex].Command}
+			rf.applyCh <- msg
+			fmt.Printf("once commit one new log %v\n", rf.commitIndex)
+		}
+		rf.mu.Unlock()
+	}
 }
 
 // 对于每次start，启动一个goroutine去同步logs，当一半以上都同步时，commit
@@ -120,6 +152,7 @@ func (rf *Raft) syncLog(index int, term int) {
 	fmt.Printf("me:%v commit log[%v]\n", rf.me, index)
 	msg := ApplyMsg{CommandValid: true, CommandIndex: index, Command: rf.logs[index].Command}
 	rf.applyCh <- msg
+	rf.commitIndex = index
 	// 通知其他可以commit的follower进行commit
 	for i := 0; i < rf.serverNum; i++ {
 		if i == rf.me || rf.matchIndex[i] < index {
@@ -141,11 +174,13 @@ func (rf *Raft) MatchLog(server int) {
 		args := CheckMatchLogArgs{rf.me, rf.term, rf.logs[matchIndex].Term, matchIndex}
 		rf.mu.Unlock()
 		reply := CheckMatchLogReply{}
-		ok := false
+		ok := rf.sendMatchLog(server, &args, &reply)
 		fmt.Printf("me:%v check server:%v's log[%v]\n", rf.me, server, args.Index)
-		for !ok {
-			ok = rf.sendMatchLog(server, &args, &reply)
-			time.Sleep(50 * time.Millisecond)
+		if !ok {
+			return
+
+			// ok = rf.sendMatchLog(server, &args, &reply)
+			// time.Sleep(50 * time.Millisecond)
 		}
 
 		// 检查自己是否过时了
@@ -177,10 +212,13 @@ func (rf *Raft) MatchLog(server int) {
 		fmt.Printf("me:%v sync server%v's log[%v]\n", rf.me, server, matchIndex)
 		ok := false
 		reply := SyncLogEntryReply{}
-		for !ok {
-			ok = rf.sendSyncLog(server, &args, &reply)
-			time.Sleep(50 * time.Millisecond)
+		// for !ok {
+		ok = rf.sendSyncLog(server, &args, &reply)
+		if !ok {
+			return
 		}
+		// time.Sleep(50 * time.Millisecond)
+		// }
 
 		// 反复检查自己是否过时了
 		rf.mu.Lock()
@@ -264,10 +302,11 @@ func (rf *Raft) CommitLog(server int, index int) {
 	args := CommitLogArgs{rf.me, rf.term, index}
 	reply := CommitLogReply{}
 	rf.mu.Unlock()
-	ok := false
-	for !ok {
-		ok = rf.sendCommitLog(server, &args, &reply)
-		time.Sleep(50 * time.Millisecond)
+	ok := rf.sendCommitLog(server, &args, &reply)
+	if !ok {
+		return
+		// ok = rf.sendCommitLog(server, &args, &reply)
+		// time.Sleep(50 * time.Millisecond)
 	}
 
 	// 检查自己是否过时了
@@ -297,11 +336,56 @@ func (rf *Raft) FollowerCommitLog(args *CommitLogArgs, reply *CommitLogReply) {
 		reply.CurTerm = rf.term
 		return
 	}
+	ResetTimer(rf.heartbeatTimer, 200, 150)
+	if args.Index < rf.commitIndex {
+		fmt.Printf("me:%v already commited %v\n", rf.me, args.Index)
+		return
+	}
 	rf.state = StateFollower
 	rf.term = args.CurTerm
-	ResetTimer(rf.heartbeatTimer, 200, 150)
 
 	fmt.Printf("me:%v commit log[%v]\n", rf.me, args.Index)
 	msg := ApplyMsg{CommandValid: true, CommandIndex: args.Index, Command: rf.logs[args.Index].Command}
 	rf.applyCh <- msg
+	rf.commitIndex = args.Index
+}
+
+func (rf *Raft) HeartCommitLog(server int, start int, target int) {
+	// 对server进行commit，原理是对每个index进行同步和commit
+	// 因为发送的都是已经commit的log，所以不需要担心term的问题，直接传log同步即可
+	for start < target {
+		start++
+		rf.mu.Lock()
+		if rf.state != StateLeader {
+			fmt.Printf("me:%v is not leader, stop commit\n", rf.me)
+			rf.mu.Unlock()
+			return
+		}
+		args := CheckMatchLogArgs{rf.me, rf.term, rf.logs[start].Term, start}
+		rf.mu.Unlock()
+		reply := CheckMatchLogReply{}
+		ok := rf.sendMatchLog(server, &args, &reply)
+		fmt.Printf("me:%v check server:%v's log[%v]\n", rf.me, server, args.Index)
+		if !ok {
+			return
+		}
+		if !reply.IfMatch {
+			rf.mu.Lock()
+			args := SyncLogEntryArgs{rf.me, rf.term, rf.logs[start]}
+			rf.mu.Unlock()
+			fmt.Printf("me:%v heart sync server%v's log[%v]\n", rf.me, server, start)
+			reply := SyncLogEntryReply{}
+			ok := rf.sendSyncLog(server, &args, &reply)
+			if !ok {
+				return
+				// ok = rf.sendSyncLog(server, &args, &reply)
+				// time.Sleep(50 * time.Millisecond)
+			}
+			// 传完后，给leader发送信号，表示可以commit
+			rf.mu.Lock()
+			rf.matchIndex[server] = start
+			rf.mu.Unlock()
+		}
+		rf.CommitLog(server, start)
+	}
 }
