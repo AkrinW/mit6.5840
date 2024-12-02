@@ -79,7 +79,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.mu.Unlock()
 		return -1, -1, false
 	}
+	rf.termmu.RLock()
 	newlog := LogEntry{command, rf.term, rf.nextIndex}
+	rf.termmu.RUnlock()
 	rf.matchIndex[rf.me] = rf.nextIndex
 	rf.nextIndex++
 	rf.logs = append(rf.logs, newlog)
@@ -136,11 +138,14 @@ func (rf *Raft) commiter() {
 			continue
 		}
 		index := matchIndex[rf.serverNum/2]
+		rf.termmu.RLock()
 		if rf.logs[index].Term < rf.term {
-			fmt.Printf("new match log, but old term not commit\n")
+			fmt.Printf("new match log%v, but old term%v not commit\n", rf.logs[index], rf.term)
 			rf.mu.Unlock()
+			rf.termmu.RUnlock()
 			continue
 		}
+		rf.termmu.RUnlock()
 		for rf.commitIndex < matchIndex[rf.serverNum/2] {
 			rf.commitIndex++
 			msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex].Command}
@@ -174,22 +179,33 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, commitindex int
 		logentries[index-i] = rf.logs[index]
 		index++
 	}
+	rf.mu.Unlock()
+	rf.termmu.RLock()
 	args := SyncLogEntryArgs{rf.me, rf.term, logentries}
 	reply := SyncLogEntryReply{}
-	rf.mu.Unlock()
+	rf.termmu.RUnlock()
 	fmt.Printf("me:%v sync server:%v's log%v to %v\n", rf.me, server, i, index-1)
-	fmt.Printf("logs:%v\n", args.Log)
-	ok := rf.sendSyncLog(server, &args, &reply)
-	if !ok {
-		rf.mu.Lock()
-		rf.incheck[server] = false
-		rf.mu.Unlock()
-		return
+	// fmt.Printf("logs:%v\n", args.Log)
+	ok := false
+	rpccount := 0
+	for !ok {
+		ok = rf.sendSyncLog(server, &args, &reply)
+		time.Sleep(50 * time.Millisecond)
+		rpccount++
+		if rpccount > 3 {
+			rf.mu.Lock()
+			rf.incheck[server] = false
+			rf.mu.Unlock()
+			return
+		}
 		// ok = rf.sendMatchLog(server, &args, &reply)
 		// time.Sleep(50 * time.Millisecond)
 	}
 	// 检查自己是否过时了
 	rf.mu.Lock()
+	rf.termmu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.termmu.Unlock()
 	if rf.term < reply.CurTerm {
 		fmt.Printf("me:%v is old term, change to follower\n", rf.me)
 		rf.term = reply.CurTerm
@@ -197,12 +213,10 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, commitindex int
 		ResetTimer(rf.heartbeatTimer, 200, 150)
 		rf.incheck[server] = false
 		rf.persist()
-		rf.mu.Unlock()
 		return
 	}
 	rf.matchIndex[server] = index - 1
 	rf.incheck[server] = false
-	rf.mu.Unlock()
 
 	// matchIndex := rf.nextIndex - 1
 	// curIndex := matchIndex
@@ -406,27 +420,32 @@ func (rf *Raft) SyncLog(args *SyncLogEntryArgs, reply *SyncLogEntryReply) {
 	reply.CurTerm = args.CurTerm
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	rf.termmu.RLock()
 	if args.CurTerm < rf.term {
 		// old request , refuse
 		fmt.Printf("me:%v reci old leader check match,ignore\n", rf.me)
 		reply.CurTerm = rf.term
+		rf.termmu.RUnlock()
 		return
 	}
+	rf.termmu.RUnlock()
+	rf.termmu.Lock()
 	if rf.state != StateFollower || rf.term != args.CurTerm {
 		rf.state = StateFollower
 		rf.term = args.CurTerm
-		rf.persist()
 	}
+	rf.termmu.Unlock()
 	ResetTimer(rf.heartbeatTimer, 200, 150)
 	index := 0
 	// fmt.Printf("me:%v log before sync%v\n", rf.me, rf.logs)
 	for i := 0; i < len(args.Log); i++ {
 		index = args.Log[i].Index
-		if index < rf.nextIndex {
+		// 修改这里赋值log的逻辑，注意不能用nextindex修改，而要用log的长度修改，
+		// 因为nextindex和log实际长度不对应会导致错误的append
+		if index < len(rf.logs) {
 			rf.logs[index] = args.Log[i]
 		} else {
 			rf.logs = append(rf.logs, args.Log[i])
-			rf.nextIndex++
 		}
 	}
 	rf.matchIndex[rf.me] = index

@@ -59,6 +59,7 @@ const (
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	termmu    sync.RWMutex        // 给term准备读写锁，提高并发性
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -89,7 +90,13 @@ type Raft struct {
 }
 
 func ResetTimer(t *time.Timer, a int32, b int32) {
-	t.Stop()
+	if !t.Stop() {
+		// 如果 `Stop` 返回 false，说明 `Timer` 的信号已经进入管道，清空它
+		select {
+		case <-t.C:
+		default:
+		}
+	}
 	ms := a + (rand.Int31() % b)
 	t.Reset(time.Duration(ms) * time.Millisecond)
 }
