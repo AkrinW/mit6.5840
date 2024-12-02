@@ -811,20 +811,17 @@ func TestFigure83C(t *testing.T) {
 	defer cfg.cleanup()
 
 	cfg.begin("Test (3C): Figure 8")
-	tmp := 1
-	cfg.one(tmp, 1, true)
-	tmp++
+	cfg.one(rand.Int(), 1, true)
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
 		leader := -1
 		for i := 0; i < servers; i++ {
 			if cfg.rafts[i] != nil {
-				_, _, ok := cfg.rafts[i].Start(tmp)
+				_, _, ok := cfg.rafts[i].Start(rand.Int())
 				if ok {
 					leader = i
 				}
 			}
-			tmp++
 		}
 
 		if (rand.Int() % 1000) < 100 {
@@ -857,7 +854,7 @@ func TestFigure83C(t *testing.T) {
 		}
 	}
 
-	cfg.one(tmp, servers, true)
+	cfg.one(rand.Int(), servers, true)
 
 	cfg.end()
 }

@@ -12,6 +12,12 @@ type LogEntry struct {
 	Index   int
 }
 
+// 简化版entry，用来matchlog，
+type SimpleLogEntry struct {
+	Term  int
+	Index int
+}
+
 type CheckMatchLogArgs struct {
 	Me         int
 	CurTerm    int      // 当前任期
@@ -25,16 +31,16 @@ type CheckMatchLogReply struct {
 	IfContinue bool // Follower提示Leader是否要继续发前一个Log的信息
 }
 
-// type SyncLogEntryArgs struct {
-// 	Me      int
-// 	CurTerm int
-// 	Log     LogEntry
-// }
+type SyncLogEntryArgs struct {
+	Me      int
+	CurTerm int
+	Log     []LogEntry
+}
 
-// type SyncLogEntryReply struct {
-// 	Me      int
-// 	CurTerm int
-// }
+type SyncLogEntryReply struct {
+	Me      int
+	CurTerm int
+}
 
 // type CommitLogArgs struct {
 // 	Me      int
@@ -145,58 +151,106 @@ func (rf *Raft) commiter() {
 	}
 }
 
-func (rf *Raft) MatchLog(server int) {
+func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, commitindex int) {
 	// 先一个个往前遍历，寻找最后一个同步的节点
 	// leader向follower从后往前发送index与term，找到第一个相同的。
 	rf.mu.Lock()
 	rf.incheck[server] = true
-	matchIndex := rf.nextIndex - 1
-	curIndex := matchIndex
-	rf.mu.Unlock()
-	for matchIndex > 0 {
-		rf.mu.Lock()
-		args := CheckMatchLogArgs{rf.me, rf.term, rf.logs[matchIndex], rf.matchIndex[server]}
-		rf.mu.Unlock()
-		reply := CheckMatchLogReply{}
-		fmt.Printf("me:%v check server:%v's log[%v]\n", rf.me, server, matchIndex)
-		// 在checkmatch的过程中被disconnected了。只传输了部分数据。
-		// leader方面无法进行调整，应该把传一半设计为没传的情况。在follow进行修改
-		ok := rf.sendMatchLog(server, &args, &reply)
-		if !ok {
-			rf.mu.Lock()
-			rf.incheck[server] = false
-			rf.mu.Unlock()
-			return
-			// ok = rf.sendMatchLog(server, &args, &reply)
-			// time.Sleep(50 * time.Millisecond)
+	// 再次重构，需要match的follower一次性发送大量节点，leader进行比较后确认从哪里开始同步
+	i := 0
+	index := commitindex
+	for i < len(slogentry) {
+		index = slogentry[i].Index
+		if rf.logs[index].Term != slogentry[i].Term {
+			index--
+			break
 		}
-
-		// 检查自己是否过时了
-		rf.mu.Lock()
-		if rf.term < reply.CurTerm {
-			fmt.Printf("me:%v is old term, change to follower\n", rf.me)
-			rf.term = reply.CurTerm
-			rf.state = StateFollower
-			ResetTimer(rf.heartbeatTimer, 200, 150)
-			rf.incheck[server] = false
-			rf.persist()
-			rf.mu.Unlock()
-			return
-		}
-		rf.mu.Unlock()
-
-		if !reply.IfContinue {
-			rf.mu.Lock()
-			// fmt.Printf("change matchindex[%v] in matchlog\n", server)
-			rf.matchIndex[server] = curIndex
-			rf.incheck[server] = false
-			rf.mu.Unlock()
-			return
-		} else {
-			// 检查前一个index是否匹配
-			matchIndex--
-		}
+		i++
 	}
+	index++
+	i = index
+	logentries := make([]LogEntry, rf.nextIndex-index)
+	for index < rf.nextIndex {
+		logentries[index-i] = rf.logs[index]
+		index++
+	}
+	args := SyncLogEntryArgs{rf.me, rf.term, logentries}
+	reply := SyncLogEntryReply{}
+	rf.mu.Unlock()
+	fmt.Printf("me:%v sync server:%v's log%v to %v\n", rf.me, server, i, index-1)
+	fmt.Printf("logs:%v\n", args.Log)
+	ok := rf.sendSyncLog(server, &args, &reply)
+	if !ok {
+		rf.mu.Lock()
+		rf.incheck[server] = false
+		rf.mu.Unlock()
+		return
+		// ok = rf.sendMatchLog(server, &args, &reply)
+		// time.Sleep(50 * time.Millisecond)
+	}
+	// 检查自己是否过时了
+	rf.mu.Lock()
+	if rf.term < reply.CurTerm {
+		fmt.Printf("me:%v is old term, change to follower\n", rf.me)
+		rf.term = reply.CurTerm
+		rf.state = StateFollower
+		ResetTimer(rf.heartbeatTimer, 200, 150)
+		rf.incheck[server] = false
+		rf.persist()
+		rf.mu.Unlock()
+		return
+	}
+	rf.matchIndex[server] = index - 1
+	rf.incheck[server] = false
+	rf.mu.Unlock()
+
+	// matchIndex := rf.nextIndex - 1
+	// curIndex := matchIndex
+	// rf.mu.Unlock()
+	// for matchIndex > 0 {
+	// 	rf.mu.Lock()
+	// 	args := CheckMatchLogArgs{rf.me, rf.term, rf.logs[matchIndex], rf.matchIndex[server]}
+	// 	rf.mu.Unlock()
+	// 	reply := CheckMatchLogReply{}
+	// 	fmt.Printf("me:%v check server:%v's log[%v]\n", rf.me, server, matchIndex)
+	// 	// 在checkmatch的过程中被disconnected了。只传输了部分数据。
+	// 	// leader方面无法进行调整，应该把传一半设计为没传的情况。在follow进行修改
+	// 	ok := rf.sendMatchLog(server, &args, &reply)
+	// 	if !ok {
+	// 		rf.mu.Lock()
+	// 		rf.incheck[server] = false
+	// 		rf.mu.Unlock()
+	// 		return
+	// 		// ok = rf.sendMatchLog(server, &args, &reply)
+	// 		// time.Sleep(50 * time.Millisecond)
+	// 	}
+
+	// 	// 检查自己是否过时了
+	// 	rf.mu.Lock()
+	// 	if rf.term < reply.CurTerm {
+	// 		fmt.Printf("me:%v is old term, change to follower\n", rf.me)
+	// 		rf.term = reply.CurTerm
+	// 		rf.state = StateFollower
+	// 		ResetTimer(rf.heartbeatTimer, 200, 150)
+	// 		rf.incheck[server] = false
+	// 		rf.persist()
+	// 		rf.mu.Unlock()
+	// 		return
+	// 	}
+	// 	rf.mu.Unlock()
+
+	// if !reply.IfContinue {
+	// 	rf.mu.Lock()
+	// 	// fmt.Printf("change matchindex[%v] in matchlog\n", server)
+	// 	rf.matchIndex[server] = curIndex
+	// 	rf.incheck[server] = false
+	// 	rf.mu.Unlock()
+	// 	return
+	// 	} else {
+	// 		// 检查前一个index是否匹配
+	// 		matchIndex--
+	// 	}
+	// }
 
 	// // 找到后，把后面的entrylog一个个传入，保证一致性
 	// fmt.Printf("server%v's matchindex is %v\n", server, matchIndex)
@@ -234,71 +288,71 @@ func (rf *Raft) MatchLog(server int) {
 	// leader commit完后 再要求各followercommit
 }
 
-func (rf *Raft) sendMatchLog(server int, args *CheckMatchLogArgs, reply *CheckMatchLogReply) bool {
-	ok := rf.peers[server].Call("Raft.CheckMatchLog", args, reply)
-	return ok
-}
+// func (rf *Raft) sendMatchLog(server int, args *CheckMatchLogArgs, reply *CheckMatchLogReply) bool {
+// 	ok := rf.peers[server].Call("Raft.CheckMatchLog", args, reply)
+// 	return ok
+// }
 
-func (rf *Raft) CheckMatchLog(args *CheckMatchLogArgs, reply *CheckMatchLogReply) {
-	// Your code here (3A, 3B).
-	reply.Me = rf.me
-	reply.CurTerm = args.CurTerm
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if args.CurTerm < rf.term {
-		// old request , refuse
-		fmt.Printf("me:%v reci old leader check match,ignore\n", rf.me)
-		reply.CurTerm = rf.term
-		reply.IfContinue = false
-		return
-	}
-	// 额外存储一个数据，为接受matchlog时，follower的term，
-	// 如果传一半又有新的match请求，就把原有的tmplog清空再执行
-	if args.CurTerm > rf.tmpterm {
-		rf.tmpterm = args.CurTerm
-		rf.tmplogs = []LogEntry{}
-	}
-	if rf.state != StateFollower || rf.term != args.CurTerm {
-		rf.state = StateFollower
-		rf.term = args.CurTerm
-		rf.persist()
-	}
-	ResetTimer(rf.heartbeatTimer, 200, 150)
-	rf.tmplogs = append(rf.tmplogs, args.Log)
-	if args.Log.Index == args.MatchIndex+1 || args.Log.Index == rf.commitIndex+1 {
-		reply.IfContinue = false
-		// 到这里就已经全部同步了 ，倒序把tmplog插入到log里，再清空tmplog
-		for tmp := len(rf.tmplogs); tmp > 0; {
-			tmp--
-			index := rf.tmplogs[tmp].Index
-			// 总觉得这里直接用rf.nextindex有风险，还是直接获取log长度比较稳定
-			if index < len(rf.logs) {
-				rf.logs[index] = rf.tmplogs[tmp]
-			} else {
-				rf.logs = append(rf.logs, rf.tmplogs[tmp])
-			}
-			// rf.logs[rf.tmplogs[tmp].Index] = rf.tmplogs[tmp]
-			// rf.logs = append(rf.logs, rf.tmplogs[tmp])
-			fmt.Printf("me:%v sync log[%v] from%v\n", rf.me, index, args.Me)
-		}
-		rf.nextIndex = len(rf.logs)
-		rf.tmplogs = []LogEntry{}
-		rf.persist()
-	} else {
-		reply.IfContinue = true
-	}
-	// rf.persist()
-	// if args.Index >= rf.nextIndex {
-	// 	reply.IfMatch = false
-	// 	fmt.Printf("me:%v dont get log[%v]\n", rf.me, args.Index)
-	// } else if args.LogTerm != rf.logs[args.Index].Term {
-	// 	reply.IfMatch = false
-	// 	fmt.Printf("me:%v in log[%v] has diff term%v\n", rf.me, args.Index, rf.logs[args.Index].Term)
-	// } else {
-	// 	reply.IfMatch = true
-	// 	fmt.Printf("me:%v in log[%v] is match\n", rf.me, args.Index)
-	// }
-}
+// func (rf *Raft) CheckMatchLog(args *CheckMatchLogArgs, reply *CheckMatchLogReply) {
+// 	// Your code here (3A, 3B).
+// 	reply.Me = rf.me
+// 	reply.CurTerm = args.CurTerm
+// 	rf.mu.Lock()
+// 	defer rf.mu.Unlock()
+// 	if args.CurTerm < rf.term {
+// 		// old request , refuse
+// 		fmt.Printf("me:%v reci old leader check match,ignore\n", rf.me)
+// 		reply.CurTerm = rf.term
+// 		reply.IfContinue = false
+// 		return
+// 	}
+// 	// 额外存储一个数据，为接受matchlog时，follower的term，
+// 	// 如果传一半又有新的match请求，就把原有的tmplog清空再执行
+// 	if args.CurTerm > rf.tmpterm {
+// 		rf.tmpterm = args.CurTerm
+// 		rf.tmplogs = []LogEntry{}
+// 	}
+// 	if rf.state != StateFollower || rf.term != args.CurTerm {
+// 		rf.state = StateFollower
+// 		rf.term = args.CurTerm
+// 		rf.persist()
+// 	}
+// 	ResetTimer(rf.heartbeatTimer, 200, 150)
+// 	rf.tmplogs = append(rf.tmplogs, args.Log)
+// 	if args.Log.Index == args.MatchIndex+1 || args.Log.Index == rf.commitIndex+1 {
+// 		reply.IfContinue = false
+// 		// 到这里就已经全部同步了 ，倒序把tmplog插入到log里，再清空tmplog
+// 		for tmp := len(rf.tmplogs); tmp > 0; {
+// 			tmp--
+// 			index := rf.tmplogs[tmp].Index
+// 			// 总觉得这里直接用rf.nextindex有风险，还是直接获取log长度比较稳定
+// 			if index < len(rf.logs) {
+// 				rf.logs[index] = rf.tmplogs[tmp]
+// 			} else {
+// 				rf.logs = append(rf.logs, rf.tmplogs[tmp])
+// 			}
+// 			// rf.logs[rf.tmplogs[tmp].Index] = rf.tmplogs[tmp]
+// 			// rf.logs = append(rf.logs, rf.tmplogs[tmp])
+// 			fmt.Printf("me:%v sync log[%v] from%v\n", rf.me, index, args.Me)
+// 		}
+// 		rf.nextIndex = len(rf.logs)
+// 		rf.tmplogs = []LogEntry{}
+// 		rf.persist()
+// 	} else {
+// 		reply.IfContinue = true
+// 	}
+// 	// rf.persist()
+// 	// if args.Index >= rf.nextIndex {
+// 	// 	reply.IfMatch = false
+// 	// 	fmt.Printf("me:%v dont get log[%v]\n", rf.me, args.Index)
+// 	// } else if args.LogTerm != rf.logs[args.Index].Term {
+// 	// 	reply.IfMatch = false
+// 	// 	fmt.Printf("me:%v in log[%v] has diff term%v\n", rf.me, args.Index, rf.logs[args.Index].Term)
+// 	// } else {
+// 	// 	reply.IfMatch = true
+// 	// 	fmt.Printf("me:%v in log[%v] is match\n", rf.me, args.Index)
+// 	// }
+// }
 
 // // 对于每次start，启动一个goroutine去同步logs，当一半以上都同步时，commit
 // func (rf *Raft) syncLog(index int, term int) {
@@ -342,10 +396,46 @@ func (rf *Raft) CheckMatchLog(args *CheckMatchLogArgs, reply *CheckMatchLogReply
 // 	}
 // }
 
-// func (rf *Raft) sendSyncLog(server int, args *SyncLogEntryArgs, reply *SyncLogEntryReply) bool {
-// 	ok := rf.peers[server].Call("Raft.SyncLog", args, reply)
-// 	return ok
-// }
+func (rf *Raft) sendSyncLog(server int, args *SyncLogEntryArgs, reply *SyncLogEntryReply) bool {
+	ok := rf.peers[server].Call("Raft.SyncLog", args, reply)
+	return ok
+}
+
+func (rf *Raft) SyncLog(args *SyncLogEntryArgs, reply *SyncLogEntryReply) {
+	reply.Me = rf.me
+	reply.CurTerm = args.CurTerm
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.CurTerm < rf.term {
+		// old request , refuse
+		fmt.Printf("me:%v reci old leader check match,ignore\n", rf.me)
+		reply.CurTerm = rf.term
+		return
+	}
+	if rf.state != StateFollower || rf.term != args.CurTerm {
+		rf.state = StateFollower
+		rf.term = args.CurTerm
+		rf.persist()
+	}
+	ResetTimer(rf.heartbeatTimer, 200, 150)
+	index := 0
+	// fmt.Printf("me:%v log before sync%v\n", rf.me, rf.logs)
+	for i := 0; i < len(args.Log); i++ {
+		index = args.Log[i].Index
+		if index < rf.nextIndex {
+			rf.logs[index] = args.Log[i]
+		} else {
+			rf.logs = append(rf.logs, args.Log[i])
+			rf.nextIndex++
+		}
+	}
+	rf.matchIndex[rf.me] = index
+	rf.nextIndex = index + 1
+	rf.persist()
+	// fmt.Printf("me:%v log after sync%v\n", rf.me, rf.logs)
+
+	fmt.Printf("me:%v sync from%v log%v to %v\n", rf.me, args.Me, args.Log[0].Index, index)
+}
 
 // func (rf *Raft) SyncLog(args *SyncLogEntryArgs, reply *SyncLogEntryReply) {
 // 	reply.Me = rf.me

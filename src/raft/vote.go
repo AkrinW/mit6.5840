@@ -36,9 +36,10 @@ type HeartbeatsArgs struct {
 
 type HeartbeatsReply struct {
 	Me          int
-	Term        int  // 返回自己的term给leader，如果leader发现自己落后了，就把自己变为follower
-	CommitIndex int  // 返回自己的commitindex，给leader检查
-	IfNeedMatch bool // 返回自己是否需要同步
+	Term        int              // 返回自己的term给leader，如果leader发现自己落后了，就把自己变为follower
+	CommitIndex int              // 返回自己的commitindex，给leader检查
+	IfNeedMatch bool             // 返回自己是否需要同步
+	SLogEntries []SimpleLogEntry //返回从commit开始的所有log，用于比较一致性
 }
 
 // 需要注意数据争用的问题，比较关键的数据类型每次读或写都需要加锁，保证原子性
@@ -300,7 +301,7 @@ func (rf *Raft) startHeartBeat(server int) {
 	// 检查reply的commit，如果落后，就让它进行更新
 	if reply.IfNeedMatch {
 		if !rf.incheck[server] {
-			go rf.MatchLog(server)
+			go rf.MatchLog(server, reply.SLogEntries, reply.CommitIndex)
 		}
 	} else {
 		if rf.matchIndex[server] < curIndex {
@@ -344,6 +345,12 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 		}
 		if args.CurIndex > rf.nextIndex-1 || args.CurTerm != rf.logs[args.CurIndex].Term {
 			reply.IfNeedMatch = true
+			reply.SLogEntries = make([]SimpleLogEntry, rf.nextIndex-rf.commitIndex-1)
+			// 如果follower所有log都commit，这里的长度就是0，需要leader额外判断
+			for i := 0; i < rf.nextIndex-rf.commitIndex-1; i++ {
+				reply.SLogEntries[i].Index = rf.commitIndex + 1 + i
+				reply.SLogEntries[i].Term = rf.logs[rf.commitIndex+1+i].Term
+			}
 		}
 		if args.CommitIndex < rf.nextIndex && args.CommitTerm == rf.logs[args.CommitIndex].Term {
 			for rf.commitIndex < args.CommitIndex {
