@@ -83,6 +83,7 @@ type Raft struct {
 	commitIndex int        //对于leader，表示自己已经提交到了第几个log
 	matchIndex  []int      //每个节点要存储与其他节点一致的log下标，但是只有当这个节点是leader时才有用
 	nextIndex   int        //下一个要写入的下标
+	incheck     []bool     // 这个用来表示某个follower是否正在check中，避免心跳重复执行checklog
 	// logTimer    *time.Timer
 }
 
@@ -164,6 +165,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.matchIndex = make([]int, rf.serverNum)
 	rf.nextIndex = 1
+	rf.incheck = make([]bool, rf.serverNum)
+
 	// rf.logTimer = time.NewTimer(10000 * time.Millisecond)
 	// rf.logTimer.Stop()
 

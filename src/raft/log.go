@@ -94,7 +94,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 func (rf *Raft) commiter() {
 	for !rf.killed() {
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 		rf.mu.Lock()
 		state := rf.state
 		rf.mu.Unlock()
@@ -102,7 +102,7 @@ func (rf *Raft) commiter() {
 			return
 		}
 		// 先考虑不降级leader的情况
-		fmt.Printf("me:%v every0.5s check if commit\n", rf.me)
+		fmt.Printf("me:%v every0.2s check if commit\n", rf.me)
 		rf.mu.Lock()
 		matchIndex := make([]int, rf.serverNum)
 		copy(matchIndex, rf.matchIndex)
@@ -125,6 +125,7 @@ func (rf *Raft) MatchLog(server int) {
 	// 先一个个往前遍历，寻找最后一个同步的节点
 	// leader向follower从后往前发送index与term，找到第一个相同的。
 	rf.mu.Lock()
+	rf.incheck[server] = true
 	matchIndex := rf.nextIndex - 1
 	curIndex := matchIndex
 	rf.mu.Unlock()
@@ -136,6 +137,9 @@ func (rf *Raft) MatchLog(server int) {
 		ok := rf.sendMatchLog(server, &args, &reply)
 		fmt.Printf("me:%v check server:%v's log[%v]\n", rf.me, server, matchIndex)
 		if !ok {
+			rf.mu.Lock()
+			rf.incheck[server] = false
+			rf.mu.Unlock()
 			return
 			// ok = rf.sendMatchLog(server, &args, &reply)
 			// time.Sleep(50 * time.Millisecond)
@@ -148,6 +152,7 @@ func (rf *Raft) MatchLog(server int) {
 			rf.term = reply.CurTerm
 			rf.state = StateFollower
 			ResetTimer(rf.heartbeatTimer, 200, 150)
+			rf.incheck[server] = false
 			rf.mu.Unlock()
 			return
 		}
@@ -156,6 +161,7 @@ func (rf *Raft) MatchLog(server int) {
 		if !reply.IfContinue {
 			rf.mu.Lock()
 			rf.matchIndex[server] = curIndex
+			rf.incheck[server] = false
 			rf.mu.Unlock()
 			return
 		} else {

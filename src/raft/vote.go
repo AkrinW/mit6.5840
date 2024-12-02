@@ -262,7 +262,9 @@ func (rf *Raft) startHeartBeat(server int) {
 	}
 	// 检查reply的commit，如果落后，就让它进行更新
 	if reply.IfNeedMatch {
-		go rf.MatchLog(server)
+		if !rf.incheck[server] {
+			go rf.MatchLog(server)
+		}
 	} else {
 		rf.matchIndex[server] = rf.nextIndex - 1
 	}
