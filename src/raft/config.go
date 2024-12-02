@@ -571,7 +571,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			}
 			cfg.mu.Unlock()
 			if rf != nil {
-				fmt.Printf("time:%v rf:%v Start cmd%v\n", time.Now(), starts, cmd)
+				// fmt.Printf("time:%v rf:%v Start cmd%v\n", time.Now(), starts, cmd)
 				index1, _, ok := rf.Start(cmd)
 				if ok {
 					index = index1

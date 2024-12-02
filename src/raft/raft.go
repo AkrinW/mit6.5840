@@ -80,6 +80,7 @@ type Raft struct {
 	logs    []LogEntry // 存的logs
 	// tmplogterm  int        //临时log对应的term，match一半重连后term必定改变，用这个重置term状态
 	tmplogs     []LogEntry // Matchlog时存储的临时log文件
+	tmpterm     int        // Matchlog时follower的term，用来确认是哪一次执行的matchlog
 	commitIndex int        //对于leader，表示自己已经提交到了第几个log
 	matchIndex  []int      //每个节点要存储与其他节点一致的log下标，但是只有当这个节点是leader时才有用
 	nextIndex   int        //下一个要写入的下标
@@ -162,6 +163,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.logs = []LogEntry{}
 	rf.logs = append(rf.logs, LogEntry{})
+	rf.tmpterm = 0
 	rf.commitIndex = 0
 	rf.matchIndex = make([]int, rf.serverNum)
 	rf.nextIndex = 1

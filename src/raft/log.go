@@ -77,6 +77,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.matchIndex[rf.me] = rf.nextIndex
 	rf.nextIndex++
 	rf.logs = append(rf.logs, newlog)
+	rf.persist()
 	rf.mu.Unlock()
 	fmt.Printf("me:%v append log%v, term%v, index%v\n", rf.me, command, newlog.Term, newlog.Index)
 	// fmt.Printf("loginfo0:%v", rf.logs[0].Term)
@@ -95,21 +96,44 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) commiter() {
 	for !rf.killed() {
 		time.Sleep(200 * time.Millisecond)
+		// rf.mu.Lock()
+		// state := rf.state
+		// rf.mu.Unlock()
+		// if state != StateLeader {
+		// 	return
+		// }
+		// 先考虑不降级leader的情况
+		// fmt.Printf("me:%v every0.2s check if commit\n", rf.me)
+		// 这里问题出现在哪里呢？因为这里出现释放锁后又重复获取的情况，在之前判定通过后
+		// 锁被别的线程取走占用了很长时间，而这段时间rf已经不再是leader了，却没有进行判定
+		// 简单的放在一起即可，每次commit时全程占有锁
 		rf.mu.Lock()
-		state := rf.state
-		rf.mu.Unlock()
-		if state != StateLeader {
+		if rf.killed() {
+			// fmt.Printf("me:%v killed, stop commiter\n", rf.me)
+			rf.mu.Unlock()
 			return
 		}
-		// 先考虑不降级leader的情况
 		fmt.Printf("me:%v every0.2s check if commit\n", rf.me)
-		rf.mu.Lock()
+		if rf.state != StateLeader {
+			fmt.Printf("me:%v not leader return\n", rf.me)
+			rf.mu.Unlock()
+			return
+		}
+		rf.matchIndex[rf.me] = rf.nextIndex - 1
 		matchIndex := make([]int, rf.serverNum)
 		copy(matchIndex, rf.matchIndex)
 		sort.Ints(matchIndex)
 		fmt.Printf("matchindex:%v\n", rf.matchIndex)
 		if rf.commitIndex >= matchIndex[rf.serverNum/2] {
 			fmt.Printf("no new commits\n")
+			rf.mu.Unlock()
+			continue
+		}
+		index := matchIndex[rf.serverNum/2]
+		if rf.logs[index].Term < rf.term {
+			fmt.Printf("new match log, but old term not commit\n")
+			rf.mu.Unlock()
+			continue
 		}
 		for rf.commitIndex < matchIndex[rf.serverNum/2] {
 			rf.commitIndex++
@@ -134,8 +158,10 @@ func (rf *Raft) MatchLog(server int) {
 		args := CheckMatchLogArgs{rf.me, rf.term, rf.logs[matchIndex], rf.matchIndex[server]}
 		rf.mu.Unlock()
 		reply := CheckMatchLogReply{}
-		ok := rf.sendMatchLog(server, &args, &reply)
 		fmt.Printf("me:%v check server:%v's log[%v]\n", rf.me, server, matchIndex)
+		// 在checkmatch的过程中被disconnected了。只传输了部分数据。
+		// leader方面无法进行调整，应该把传一半设计为没传的情况。在follow进行修改
+		ok := rf.sendMatchLog(server, &args, &reply)
 		if !ok {
 			rf.mu.Lock()
 			rf.incheck[server] = false
@@ -153,6 +179,7 @@ func (rf *Raft) MatchLog(server int) {
 			rf.state = StateFollower
 			ResetTimer(rf.heartbeatTimer, 200, 150)
 			rf.incheck[server] = false
+			rf.persist()
 			rf.mu.Unlock()
 			return
 		}
@@ -160,6 +187,7 @@ func (rf *Raft) MatchLog(server int) {
 
 		if !reply.IfContinue {
 			rf.mu.Lock()
+			// fmt.Printf("change matchindex[%v] in matchlog\n", server)
 			rf.matchIndex[server] = curIndex
 			rf.incheck[server] = false
 			rf.mu.Unlock()
@@ -224,8 +252,17 @@ func (rf *Raft) CheckMatchLog(args *CheckMatchLogArgs, reply *CheckMatchLogReply
 		reply.IfContinue = false
 		return
 	}
-	rf.state = StateFollower
-	rf.term = args.CurTerm
+	// 额外存储一个数据，为接受matchlog时，follower的term，
+	// 如果传一半又有新的match请求，就把原有的tmplog清空再执行
+	if args.CurTerm > rf.tmpterm {
+		rf.tmpterm = args.CurTerm
+		rf.tmplogs = []LogEntry{}
+	}
+	if rf.state != StateFollower || rf.term != args.CurTerm {
+		rf.state = StateFollower
+		rf.term = args.CurTerm
+		rf.persist()
+	}
 	ResetTimer(rf.heartbeatTimer, 200, 150)
 	rf.tmplogs = append(rf.tmplogs, args.Log)
 	if args.Log.Index == args.MatchIndex+1 || args.Log.Index == rf.commitIndex+1 {
@@ -234,20 +271,23 @@ func (rf *Raft) CheckMatchLog(args *CheckMatchLogArgs, reply *CheckMatchLogReply
 		for tmp := len(rf.tmplogs); tmp > 0; {
 			tmp--
 			index := rf.tmplogs[tmp].Index
-			if index < rf.nextIndex {
+			// 总觉得这里直接用rf.nextindex有风险，还是直接获取log长度比较稳定
+			if index < len(rf.logs) {
 				rf.logs[index] = rf.tmplogs[tmp]
 			} else {
 				rf.logs = append(rf.logs, rf.tmplogs[tmp])
 			}
 			// rf.logs[rf.tmplogs[tmp].Index] = rf.tmplogs[tmp]
 			// rf.logs = append(rf.logs, rf.tmplogs[tmp])
-			fmt.Printf("me:%v sync log[%v]\n", rf.me, index)
+			fmt.Printf("me:%v sync log[%v] from%v\n", rf.me, index, args.Me)
 		}
 		rf.nextIndex = len(rf.logs)
 		rf.tmplogs = []LogEntry{}
+		rf.persist()
 	} else {
 		reply.IfContinue = true
 	}
+	// rf.persist()
 	// if args.Index >= rf.nextIndex {
 	// 	reply.IfMatch = false
 	// 	fmt.Printf("me:%v dont get log[%v]\n", rf.me, args.Index)
