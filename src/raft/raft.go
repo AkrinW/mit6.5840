@@ -59,7 +59,7 @@ const (
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	termmu    sync.RWMutex        // 给term准备读写锁，提高并发性
+	rwmu      sync.RWMutex        // 给term准备读写锁，提高并发性
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -73,8 +73,10 @@ type Raft struct {
 	serverNum      int
 	heartbeatTimer *time.Timer
 	voteTimer      *time.Timer
+	leaderTimer    *time.Timer
 	voteTo         int  //这一轮投票的对象,如果是-1,说明还没投票
 	voteGets       int  //这一轮获取的投票个数
+	voteDisagree   int  //这一轮获取的反对票个数，同样用于快速结束选举
 	ifstopvote     bool //是否停止选票，用来防止过多timer到时提醒
 
 	applyCh chan ApplyMsg
@@ -104,8 +106,8 @@ func ResetTimer(t *time.Timer, a int32, b int32) {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.rwmu.RLock()
+	defer rf.rwmu.RUnlock()
 	// var term int
 	// var isleader bool
 	// // Your code here (3A).
@@ -164,8 +166,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.voteTimer.Stop()
 	rf.heartbeatTimer = time.NewTimer(10000 * time.Millisecond)
 	ResetTimer(rf.heartbeatTimer, 200, 150)
+	rf.leaderTimer = time.NewTimer(10000 * time.Millisecond)
+	rf.leaderTimer.Stop()
 	rf.voteTo = -1
 	rf.voteGets = 0
+	rf.voteDisagree = 0
 
 	rf.applyCh = applyCh
 	rf.logs = []LogEntry{}
@@ -175,9 +180,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, rf.serverNum)
 	rf.nextIndex = 1
 	rf.incheck = make([]bool, rf.serverNum)
-
-	// rf.logTimer = time.NewTimer(10000 * time.Millisecond)
-	// rf.logTimer.Stop()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
