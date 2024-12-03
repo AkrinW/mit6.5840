@@ -2,7 +2,6 @@ package raft
 
 import (
 	"fmt"
-	"time"
 )
 
 // example RequestVote RPC arguments structure.
@@ -13,7 +12,8 @@ type RequestVoteArgs struct {
 	Term int
 	// 投票时发送自己已提交的index和log长度。
 	CommitIndex int
-	NextIndex   int
+	CurIndex    int
+	CurTerm     int // 添加最新的log的term，在commit相同时，保证有最新term的当选
 }
 
 // example RequestVote RPC reply structure.
@@ -89,9 +89,9 @@ func (rf *Raft) runFollower() {
 	// 开始投票，初始化自己的选票状态
 	rf.term++
 	fmt.Printf("me:%v term%v\n", rf.me, rf.term)
-	rf.voteTo = rf.me
-	rf.voteGets = 1
-	rf.voteDisagree = 0
+	rf.voteTo[rf.term] = rf.me
+	rf.voteGets[rf.term] = 1
+	rf.voteDisagree[rf.term] = 0
 	rf.ifstopvote = false
 	rf.persist()
 	rf.rwmu.Unlock()
@@ -124,17 +124,16 @@ func (rf *Raft) runCandidate() {
 		ResetTimer(rf.heartbeatTimer, 200, 150)
 		return
 	}
-	if rf.voteGets > rf.serverNum/2 {
-		fmt.Printf("me:%v become leader\n", rf.me)
+	if rf.voteGets[rf.term] > rf.serverNum/2 {
+		fmt.Printf("me:%v term%v become leader\n", rf.me, rf.term)
 		rf.state = StateLeader
 		// 变为leader后，启动一个goroutine检查是否进行commit
 		// 这个routine会在rf变为follower后停止
 		go rf.commiter()
 	} else {
-		fmt.Printf("me:%v vote failed\n", rf.me)
+		fmt.Printf("me:%v term%v vote failed\n", rf.me, rf.term)
 		rf.state = StateFollower
-		ResetTimer(rf.heartbeatTimer, 200, 150)
-		rf.voteTo = -1
+		ResetTimer(rf.heartbeatTimer, 300, 150)
 	}
 	rf.persist()
 }
@@ -148,8 +147,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.rwmu.Unlock()
 	term := rf.term
 	commitindex := rf.commitIndex
-	nextindex := rf.nextIndex
-	voteto := rf.voteTo
+	curindex := rf.nextIndex - 1
+	curterm := rf.logs[curindex].Term
+	_, exists := rf.voteTo[args.Term]
 
 	reply.Term = term
 	reply.Vote = false
@@ -159,24 +159,38 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	} else if args.Term == term {
 		// 同一任期
-		if voteto != -1 && args.CommitIndex >= commitindex {
-			if args.CommitIndex > commitindex || args.NextIndex >= nextindex {
+		if !exists {
+			if args.CommitIndex > commitindex {
 				reply.Vote = true
+			}
+			if args.CommitIndex == commitindex {
+				if args.CurTerm > curterm {
+					reply.Vote = true
+				}
+				if args.CurTerm == curterm && args.CurIndex >= curindex {
+					reply.Vote = true
+				}
 			}
 		}
 	} else {
 		if args.CommitIndex > commitindex {
 			reply.Vote = true
 		}
-		if args.CommitIndex == commitindex && args.NextIndex >= nextindex {
-			reply.Vote = true
+		if args.CommitIndex == commitindex {
+			if args.CurTerm > curterm {
+				reply.Vote = true
+			}
+			if args.CurTerm == curterm && args.CurIndex >= curindex {
+				reply.Vote = true
+			}
 		}
 		rf.term = args.Term
 		rf.persist()
 	}
+
 	if reply.Vote {
-		ResetTimer(rf.heartbeatTimer, 200, 150)
-		rf.voteTo = args.Me
+		ResetTimer(rf.heartbeatTimer, 300, 150)
+		rf.voteTo[args.Term] = args.Me
 		if rf.state != StateFollower {
 			rf.state = StateFollower
 			ResetTimer(rf.voteTimer, 5, 1)
@@ -221,7 +235,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) startVote(server int) {
 	rf.rwmu.RLock()
-	args := RequestVoteArgs{rf.me, rf.term, rf.commitIndex, rf.nextIndex}
+	term := rf.term
+	args := RequestVoteArgs{rf.me, term, rf.commitIndex, rf.nextIndex - 1, rf.logs[rf.nextIndex-1].Term}
 	reply := RequestVoteReply{}
 	rf.rwmu.RUnlock()
 	ok := false
@@ -238,7 +253,7 @@ func (rf *Raft) startVote(server int) {
 			defer rf.rwmu.Unlock()
 			if rf.term < reply.Term {
 				rf.term = reply.Term
-				ResetTimer(rf.heartbeatTimer, 200, 150)
+				ResetTimer(rf.heartbeatTimer, 300, 150)
 				if rf.state != StateFollower {
 					rf.state = StateFollower
 					ResetTimer(rf.voteTimer, 5, 1)
@@ -248,29 +263,28 @@ func (rf *Raft) startVote(server int) {
 			}
 			return
 		}
-		time.Sleep(50 * time.Millisecond)
 		rpccount++
 		// fmt.Printf("me%v requestvote %v failed\n", rf.me, server)
 		// 尝试给rpc次数增加限制。
 		// 投票时间最长1000ms，超过这个次数投票时间也已经结束，可以退出
-		if rpccount > 20 {
+		if rpccount > 15 {
 			return
 		}
 	}
 	// 检查是不是无效票
 	rf.rwmu.Lock()
 	defer rf.rwmu.Unlock()
-	if rf.state != StateCandidate || rf.ifstopvote || args.Term != rf.term {
+	if rf.state != StateCandidate || rf.ifstopvote || term != rf.term {
 		return
 	}
 
 	if reply.Vote {
-		rf.voteGets++
+		rf.voteGets[term]++
 	} else {
-		rf.voteDisagree++
+		rf.voteDisagree[term]++
 	}
 	// 即时检查选票
-	if rf.voteGets > rf.serverNum/2 || rf.voteDisagree > rf.serverNum/2 {
+	if rf.voteGets[term] > rf.serverNum/2 || rf.voteDisagree[term] > rf.serverNum/2 {
 		ResetTimer(rf.voteTimer, 5, 1)
 		rf.ifstopvote = true
 	}
@@ -315,7 +329,7 @@ func (rf *Raft) startHeartBeat(server int) {
 			defer rf.rwmu.Unlock()
 			if rf.term < reply.Term {
 				rf.term = reply.Term
-				ResetTimer(rf.heartbeatTimer, 200, 150)
+				ResetTimer(rf.heartbeatTimer, 300, 150)
 				if rf.state != StateFollower {
 					rf.state = StateFollower
 					ResetTimer(rf.voteTimer, 5, 1)
@@ -325,10 +339,9 @@ func (rf *Raft) startHeartBeat(server int) {
 			}
 			return
 		}
-		time.Sleep(50 * time.Millisecond)
 		rpccount++
 		// fmt.Printf("me:%v heartbeat %v failed\n", rf.me, server)
-		if rpccount > 2 { // 心跳的发送频率是100ms，超过时长后就有新的心跳发送
+		if rpccount > 3 { // 心跳的发送频率是100ms，超过时长后就有新的心跳发送
 			return
 		}
 	}
@@ -343,7 +356,7 @@ func (rf *Raft) startHeartBeat(server int) {
 	}
 	if reply.CommitIndex > rf.commitIndex {
 		if rf.state != StateFollower {
-			ResetTimer(rf.heartbeatTimer, 200, 150)
+			ResetTimer(rf.heartbeatTimer, 300, 150)
 			ResetTimer(rf.voteTimer, 5, 1)
 			ResetTimer(rf.leaderTimer, 5, 1)
 			rf.state = StateFollower
@@ -359,7 +372,7 @@ func (rf *Raft) startHeartBeat(server int) {
 		// 不需要check，说明follower同步到了最新的curindex，把信息更新到leader中
 		// 原本设计为matchindex[]不会下降的情况，尝试改为实时更新型
 		if rf.matchIndex[server] != curindex {
-			fmt.Printf("no matchlog, change matchindex[%v]=%v\n", server, curindex)
+			// fmt.Printf("no matchlog, change matchindex[%v]=%v\n", server, curindex)
 			rf.matchIndex[server] = curindex
 		}
 	}
@@ -370,7 +383,7 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 	defer rf.rwmu.Unlock()
 	term := rf.term
 	commitindex := rf.commitIndex
-	nextindex := rf.nextIndex
+	// nextindex := rf.nextIndex
 
 	reply.Me = rf.me
 	reply.Term = term
@@ -384,23 +397,23 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 	// 结束后检查follower到leader的nextindex是否一致，如果不一致，就要求同步。
 
 	if args.Term < term {
-		fmt.Printf("%v is old term leader, ignore\n", args.Me)
+		// fmt.Printf("%v is old term leader, ignore\n", args.Me)
 		reply.IfOutedate = true
 		return
 	} else if args.Term > term {
 		rf.term = args.Term
 		rf.persist()
 		rf.state = StateFollower
-		ResetTimer(rf.heartbeatTimer, 200, 150)
+		ResetTimer(rf.heartbeatTimer, 300, 150)
 		ResetTimer(rf.voteTimer, 5, 1)
 		ResetTimer(rf.leaderTimer, 5, 1)
 	}
 	if args.CommitIndex < commitindex {
-		fmt.Printf("%v is old term leader, ignore\n", args.Me)
+		fmt.Printf("%v is old commit leader, ignore\n", args.Me)
 		return
 	}
 	rf.state = StateFollower
-	ResetTimer(rf.heartbeatTimer, 200, 150)
+	ResetTimer(rf.heartbeatTimer, 300, 150)
 	ResetTimer(rf.voteTimer, 5, 1)
 	ResetTimer(rf.leaderTimer, 5, 1)
 
@@ -426,16 +439,16 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 	end := args.CurIndex
 	start := rf.commitIndex + 1
 	// 检查follower和leader在commitindex和curindex是否一致，确认发送一致性请求的范围
-	if args.CommitIndex >= nextindex || args.CommitTerm != rf.logs[args.CommitIndex].Term {
-		start = rf.commitIndex + 1
-	} else if args.CurIndex >= nextindex || args.CurTerm != rf.logs[args.CurIndex].Term {
-		start = args.CommitIndex + 1
-	} else {
-		start = args.CurIndex + 1
-		reply.Start = start
-		return
-	}
-	fmt.Printf("me:%v need match %v to %v\n", rf.me, start, end)
+	// if args.CommitIndex >= nextindex || args.CommitTerm != rf.logs[args.CommitIndex].Term {
+	// 	start = rf.commitIndex + 1
+	// } else if args.CurIndex >= nextindex || args.CurTerm != rf.logs[args.CurIndex].Term {
+	// 	start = args.CommitIndex + 1
+	// } else {
+	// 	start = args.CurIndex + 1
+	// 	reply.Start = start
+	// 	return
+	// }
+	// fmt.Printf("me:%v need match %v to %v\n", rf.me, start, end)
 	// 这里为什么follower是空的也能正常进入matchindex呢？
 	// 因为已经提前开辟了缺少的空间，len(log)的判定就不是0了
 	reply.SLogEntries = make([]SimpleLogEntry, end-start+1)

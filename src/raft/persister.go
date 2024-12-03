@@ -108,7 +108,7 @@ func (rf *Raft) readPersist(data []byte) {
 	// Your code here (3C).
 	// Example:
 	var Term int
-	var Voteto int
+	var Voteto map[int]int
 	var Log []LogEntry
 	var CommitIndex int
 	r := bytes.NewBuffer(data)

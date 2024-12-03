@@ -172,7 +172,7 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int)
 			if rf.term < reply.CurTerm {
 				rf.term = reply.CurTerm
 				rf.incheck[server] = false
-				ResetTimer(rf.heartbeatTimer, 200, 150)
+				ResetTimer(rf.heartbeatTimer, 500, 150)
 				if rf.state != StateFollower {
 					rf.state = StateFollower
 					ResetTimer(rf.voteTimer, 5, 1)
@@ -182,7 +182,6 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int)
 			}
 			return
 		}
-		time.Sleep(50 * time.Millisecond)
 		rpccount++
 		// fmt.Printf("me%v synclog %v failed\n", rf.me, server)
 		if rpccount > 3 {
@@ -204,7 +203,7 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int)
 		rf.term = reply.CurTerm
 		if rf.state != StateFollower {
 			rf.state = StateFollower
-			ResetTimer(rf.heartbeatTimer, 200, 150)
+			ResetTimer(rf.heartbeatTimer, 500, 150)
 			ResetTimer(rf.leaderTimer, 5, 1)
 			ResetTimer(rf.voteTimer, 5, 1)
 		}
@@ -243,7 +242,11 @@ func (rf *Raft) SyncLog(args *SyncLogEntryArgs, reply *SyncLogEntryReply) {
 		ResetTimer(rf.voteTimer, 5, 1)
 		ResetTimer(rf.leaderTimer, 5, 1)
 	}
-	ResetTimer(rf.heartbeatTimer, 200, 150)
+	ResetTimer(rf.heartbeatTimer, 500, 150)
+	if len(args.Log) == 0 {
+		fmt.Printf("me:%v sync nothing\n", rf.me)
+		return
+	}
 	index := 0
 	// fmt.Printf("me:%v log before sync%v\n", rf.me, rf.logs)
 	for i := 0; i < len(args.Log); i++ {

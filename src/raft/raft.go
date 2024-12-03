@@ -74,10 +74,10 @@ type Raft struct {
 	heartbeatTimer *time.Timer
 	voteTimer      *time.Timer
 	leaderTimer    *time.Timer
-	voteTo         int  //这一轮投票的对象,如果是-1,说明还没投票
-	voteGets       int  //这一轮获取的投票个数
-	voteDisagree   int  //这一轮获取的反对票个数，同样用于快速结束选举
-	ifstopvote     bool //是否停止选票，用来防止过多timer到时提醒
+	voteTo         map[int]int //这一轮投票的对象,如果是-1,说明还没投票
+	voteGets       map[int]int //这一轮获取的投票个数
+	voteDisagree   map[int]int //这一轮获取的反对票个数，同样用于快速结束选举
+	ifstopvote     bool        //是否停止选票，用来防止过多timer到时提醒
 
 	applyCh chan ApplyMsg
 	logs    []LogEntry // 存的logs
@@ -94,10 +94,10 @@ type Raft struct {
 func ResetTimer(t *time.Timer, a int32, b int32) {
 	if !t.Stop() {
 		// 如果 `Stop` 返回 false，说明 `Timer` 的信号已经进入管道，清空它
-		select {
-		case <-t.C:
-		default:
-		}
+		// select {
+		// case <-t.C:
+		// default:
+		// }
 	}
 	ms := a + (rand.Int31() % b)
 	t.Reset(time.Duration(ms) * time.Millisecond)
@@ -168,9 +168,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	ResetTimer(rf.heartbeatTimer, 200, 150)
 	rf.leaderTimer = time.NewTimer(10000 * time.Millisecond)
 	rf.leaderTimer.Stop()
-	rf.voteTo = -1
-	rf.voteGets = 0
-	rf.voteDisagree = 0
+	rf.voteTo = make(map[int]int)
+	rf.voteGets = make(map[int]int)
+	rf.voteDisagree = make(map[int]int)
 
 	rf.applyCh = applyCh
 	rf.logs = []LogEntry{}
