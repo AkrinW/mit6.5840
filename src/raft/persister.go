@@ -187,4 +187,5 @@ func (rf *Raft) readPersist(data []byte) {
 		fmt.Printf("me:%v Read lastterm error:%v\n", rf.me, err)
 	}
 	rf.snapshot.LastTerm = LastTerm
+
 }

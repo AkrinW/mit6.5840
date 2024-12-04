@@ -50,6 +50,7 @@ type HeartbeatsReply struct {
 
 // 需要注意数据争用的问题，比较关键的数据类型每次读或写都需要加锁，保证原子性
 func (rf *Raft) ticker() {
+	ResetTimer(rf.heartbeatTimer, 200, 150)
 	for !rf.killed() {
 		// Your code here (3A)
 		// Check if a leader election should be started.
@@ -94,9 +95,10 @@ func (rf *Raft) runFollower() {
 	rf.voteDisagree[rf.term] = 0
 	rf.ifstopvote = false
 	rf.persist()
+	ResetTimer(rf.voteTimer, 400, 400) // 时间重置需要和锁一起
+
 	rf.rwmu.Unlock()
 
-	ResetTimer(rf.voteTimer, 400, 400)
 	// start vote
 	for i := 0; i < rf.serverNum; i++ {
 		if i == rf.me {
@@ -136,11 +138,11 @@ func (rf *Raft) runCandidate() {
 				rf.matchIndex[i] = rf.nextIndex - 1
 			}
 		}
-		go rf.commiter()
+		// go rf.commiter()
 	} else {
 		fmt.Printf("me:%v term%v vote failed\n", rf.me, rf.term)
 		rf.state = StateFollower
-		ResetTimer(rf.heartbeatTimer, 300, 150)
+		ResetTimer(rf.heartbeatTimer, 200, 150)
 	}
 	rf.persist()
 }
@@ -202,8 +204,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.voteTo[args.Term] = args.Me
 		if rf.state != StateFollower {
 			rf.state = StateFollower
-			ResetTimer(rf.voteTimer, 5, 1)
-			ResetTimer(rf.leaderTimer, 5, 1)
+			ResetTimer(rf.voteTimer, 1, 1)
+			ResetTimer(rf.leaderTimer, 1, 1)
 		}
 		fmt.Printf("me:%v vote %v, term%v\n", rf.me, args.Me, reply.Term)
 		rf.persist()
@@ -265,8 +267,8 @@ func (rf *Raft) startVote(server int) {
 				ResetTimer(rf.heartbeatTimer, 300, 150)
 				if rf.state != StateFollower {
 					rf.state = StateFollower
-					ResetTimer(rf.voteTimer, 5, 1)
-					ResetTimer(rf.leaderTimer, 5, 1)
+					ResetTimer(rf.voteTimer, 1, 1)
+					ResetTimer(rf.leaderTimer, 1, 1)
 				}
 				rf.persist()
 			}
@@ -294,13 +296,16 @@ func (rf *Raft) startVote(server int) {
 	}
 	// 即时检查选票
 	if rf.voteGets[term] > rf.serverNum/2 || rf.voteDisagree[term] > rf.serverNum/2 {
-		ResetTimer(rf.voteTimer, 5, 1)
+		ResetTimer(rf.voteTimer, 1, 1)
 		rf.ifstopvote = true
 	}
 }
 
 func (rf *Raft) runLeader() {
 	// fmt.Printf("me:%v is leader\n", rf.me)
+	if rf.killed() {
+		return
+	}
 	for i := 0; i < rf.serverNum; i++ {
 		if i == rf.me {
 			continue
@@ -341,8 +346,8 @@ func (rf *Raft) startHeartBeat(server int) {
 				ResetTimer(rf.heartbeatTimer, 300, 150)
 				if rf.state != StateFollower {
 					rf.state = StateFollower
-					ResetTimer(rf.voteTimer, 5, 1)
-					ResetTimer(rf.leaderTimer, 5, 1)
+					ResetTimer(rf.voteTimer, 1, 1)
+					ResetTimer(rf.leaderTimer, 1, 1)
 				}
 				rf.persist()
 			}
@@ -373,6 +378,7 @@ func (rf *Raft) startHeartBeat(server int) {
 		return
 	}
 	// still leader, check match
+
 	if len(reply.SLogEntries) > 0 {
 		if !rf.incheck[server] {
 			go rf.MatchLog(server, reply.SLogEntries, reply.Start)
@@ -380,7 +386,11 @@ func (rf *Raft) startHeartBeat(server int) {
 	} else {
 		// 不需要check，说明follower同步到了最新的curindex，把信息更新到leader中
 		// 原本设计为matchindex[]不会下降的情况，尝试改为实时更新型
-		rf.matchIndex[server] = reply.Start - 1
+		// 还是修改成不会下降的情况，因为在leader的同一term内，matchindex是不会下降的，过时的忽略即可
+		if rf.matchIndex[server] < reply.Start-1 {
+			rf.matchIndex[server] = reply.Start - 1
+			rf.commiter() // 有更新，检查一次commit
+		}
 	}
 }
 
@@ -413,8 +423,8 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 		rf.persist()
 		rf.state = StateFollower
 		ResetTimer(rf.heartbeatTimer, 300, 150)
-		ResetTimer(rf.voteTimer, 5, 1)
-		ResetTimer(rf.leaderTimer, 5, 1)
+		ResetTimer(rf.voteTimer, 1, 1)
+		ResetTimer(rf.leaderTimer, 1, 1)
 	}
 	if args.CommitIndex < commitindex {
 		fmt.Printf("%v is old commit leader, ignore\n", args.Me)
@@ -422,14 +432,17 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 	}
 	rf.state = StateFollower
 	ResetTimer(rf.heartbeatTimer, 300, 150)
-	ResetTimer(rf.voteTimer, 5, 1)
-	ResetTimer(rf.leaderTimer, 5, 1)
+	ResetTimer(rf.voteTimer, 1, 1)
+	ResetTimer(rf.leaderTimer, 1, 1)
 
 	// follower进行commit
 	if args.CommitIndex < rf.nextIndex && args.CommitTerm == rf.logs[args.CommitIndex-offset].Term {
 		// 添加commit次数限制 一次最多commit100条消息
 		i := 0
 		for rf.commitIndex < args.CommitIndex {
+			if rf.killed() {
+				break
+			}
 			rf.commitIndex++
 			i++
 			fmt.Printf("me:%v commit log[%v]\n", rf.me, rf.commitIndex)

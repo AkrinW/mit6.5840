@@ -69,7 +69,7 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	term           int
-	state          int32
+	state          int
 	serverNum      int
 	heartbeatTimer *time.Timer
 	voteTimer      *time.Timer
@@ -93,10 +93,10 @@ type Raft struct {
 func ResetTimer(t *time.Timer, a int32, b int32) {
 	if !t.Stop() {
 		// 如果 `Stop` 返回 false，说明 `Timer` 的信号已经进入管道，清空它
-		// select {
-		// case <-t.C:
-		// default:
-		// }
+		select {
+		case <-t.C:
+		default:
+		}
 	}
 	ms := a + (rand.Int31() % b)
 	t.Reset(time.Duration(ms) * time.Millisecond)
@@ -155,7 +155,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.voteTimer = time.NewTimer(10000 * time.Millisecond)
 	rf.voteTimer.Stop()
 	rf.heartbeatTimer = time.NewTimer(10000 * time.Millisecond)
-	ResetTimer(rf.heartbeatTimer, 200, 150)
+	rf.heartbeatTimer.Stop()
 	rf.leaderTimer = time.NewTimer(10000 * time.Millisecond)
 	rf.leaderTimer.Stop()
 	rf.voteTo = make(map[int]int)
