@@ -104,7 +104,6 @@ func (rf *Raft) commiter() {
 			rf.rwmu.Unlock()
 			return
 		}
-		rf.matchIndex[rf.me] = rf.nextIndex - 1
 		matchIndex := make([]int, rf.serverNum)
 		copy(matchIndex, rf.matchIndex)
 		sort.Ints(matchIndex)
@@ -140,7 +139,6 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int)
 	// 先一个个往前遍历，寻找最后一个同步的节点
 	// leader向follower从后往前发送index与term，找到第一个相同的。
 	rf.rwmu.Lock()
-	rf.incheck[server] = true
 	term := rf.term
 	index := startindex
 	i := 0
@@ -156,6 +154,12 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int)
 		logentries[index-i] = rf.logs[index]
 		index++
 	}
+	rf.matchIndex[server] = i - 1
+	if i == index {
+		rf.rwmu.Unlock()
+		return
+	}
+	rf.incheck[server] = true
 	args := SyncLogEntryArgs{rf.me, term, logentries}
 	reply := SyncLogEntryReply{}
 	rf.rwmu.Unlock()

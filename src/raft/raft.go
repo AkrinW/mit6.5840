@@ -79,16 +79,15 @@ type Raft struct {
 	voteDisagree   map[int]int //这一轮获取的反对票个数，同样用于快速结束选举
 	ifstopvote     bool        //是否停止选票，用来防止过多timer到时提醒
 
-	applyCh chan ApplyMsg
-	logs    []LogEntry // 存的logs
-	// tmplogterm  int        //临时log对应的term，match一半重连后term必定改变，用这个重置term状态
-	tmplogs     []LogEntry // Matchlog时存储的临时log文件
-	tmpterm     int        // Matchlog时follower的term，用来确认是哪一次执行的matchlog
+	applyCh     chan ApplyMsg
+	logs        []LogEntry // 存的logs
 	commitIndex int        //对于leader，表示自己已经提交到了第几个log
 	matchIndex  []int      //每个节点要存储与其他节点一致的log下标，但是只有当这个节点是leader时才有用
 	nextIndex   int        //下一个要写入的下标
 	incheck     []bool     // 这个用来表示某个follower是否正在check中，避免心跳重复执行checklog
-	// logTimer    *time.Timer
+
+	snapshot   *Snapshot
+	snapoffset int // 用来记录snapshot的偏移量
 }
 
 func ResetTimer(t *time.Timer, a int32, b int32) {
@@ -112,15 +111,6 @@ func (rf *Raft) GetState() (int, bool) {
 	// var isleader bool
 	// // Your code here (3A).
 	return rf.term, rf.state == StateLeader
-}
-
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (3D).
-
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -175,14 +165,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.logs = []LogEntry{}
 	rf.logs = append(rf.logs, LogEntry{})
-	rf.tmpterm = 0
 	rf.commitIndex = 0
 	rf.matchIndex = make([]int, rf.serverNum)
 	rf.nextIndex = 1
 	rf.incheck = make([]bool, rf.serverNum)
 
+	rf.snapoffset = 0
+	rf.snapshot = nil
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.readSnapshot(persister.ReadSnapshot())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()

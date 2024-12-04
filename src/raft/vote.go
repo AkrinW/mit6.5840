@@ -129,6 +129,13 @@ func (rf *Raft) runCandidate() {
 		rf.state = StateLeader
 		// 变为leader后，启动一个goroutine检查是否进行commit
 		// 这个routine会在rf变为follower后停止
+		// 每次成为leader后，需要重新构建matchindex，把自己外的全部置0
+		for i := 0; i < rf.serverNum; i++ {
+			rf.matchIndex[i] = 0
+			if i == rf.me {
+				rf.matchIndex[i] = rf.nextIndex - 1
+			}
+		}
 		go rf.commiter()
 	} else {
 		fmt.Printf("me:%v term%v vote failed\n", rf.me, rf.term)
@@ -371,10 +378,7 @@ func (rf *Raft) startHeartBeat(server int) {
 	} else {
 		// 不需要check，说明follower同步到了最新的curindex，把信息更新到leader中
 		// 原本设计为matchindex[]不会下降的情况，尝试改为实时更新型
-		if rf.matchIndex[server] != curindex {
-			// fmt.Printf("no matchlog, change matchindex[%v]=%v\n", server, curindex)
-			rf.matchIndex[server] = curindex
-		}
+		rf.matchIndex[server] = reply.Start - 1
 	}
 }
 
@@ -419,7 +423,7 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 
 	// follower进行commit
 	if args.CommitIndex < rf.nextIndex && args.CommitTerm == rf.logs[args.CommitIndex].Term {
-		// 添加commit次数限制 一次最多commit100条消息，leader不受此限制
+		// 添加commit次数限制 一次最多commit100条消息
 		i := 0
 		for rf.commitIndex < args.CommitIndex {
 			rf.commitIndex++

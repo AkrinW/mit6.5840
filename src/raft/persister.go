@@ -94,8 +94,16 @@ func (rf *Raft) persist() {
 	e.Encode(rf.voteTo)
 	e.Encode(rf.logs)
 	e.Encode(rf.commitIndex)
-	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
+	e.Encode(rf.snapoffset)
+	e.Encode(rf.nextIndex)
+	if rf.snapshot != nil {
+		if e.Encode(rf.snapshot.LastIndex) != nil || e.Encode(rf.snapshot.LastTerm) != nil {
+			fmt.Printf("me:%v Encode Raft State Failed\n", rf.me)
+		}
+		rf.persister.Save(w.Bytes(), rf.snapshot.Data)
+	} else {
+		rf.persister.Save(w.Bytes(), nil)
+	}
 }
 
 // restore previously persisted state.
@@ -111,6 +119,9 @@ func (rf *Raft) readPersist(data []byte) {
 	var Voteto map[int]int
 	var Log []LogEntry
 	var CommitIndex int
+	var Snapoffset int
+	var NextIndex int
+
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	if err := d.Decode(&Term); err != nil {
@@ -136,6 +147,16 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 	rf.commitIndex = CommitIndex
-	rf.nextIndex = len(rf.logs)
-	rf.tmplogs = make([]LogEntry, 0)
+
+	if err := d.Decode(&Snapoffset); err != nil {
+		fmt.Printf("me:%v Read snapoffset error:%v\n", rf.me, err)
+		return
+	}
+	rf.snapoffset = Snapoffset
+
+	if err := d.Decode(&NextIndex); err != nil {
+		fmt.Printf("me:%v Read nextindex error:%v\n", rf.me, err)
+	}
+	rf.nextIndex = NextIndex
+
 }
