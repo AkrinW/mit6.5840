@@ -58,15 +58,17 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	state := rf.state
 	term := rf.term
 	index := rf.nextIndex
+	offset := rf.snapoffset
 
 	if state != StateLeader {
 		return -1, -1, false
 	}
 	newlog := LogEntry{command, term, index}
 
+	// 注意扩充logs时，怎么判断logs的长度和index
 	rf.matchIndex[rf.me] = index
-	if len(rf.logs) > index {
-		rf.logs[index] = newlog
+	if len(rf.logs) > index-offset {
+		rf.logs[index-offset] = newlog
 	} else {
 		rf.logs = append(rf.logs, newlog)
 	}
@@ -107,6 +109,7 @@ func (rf *Raft) commiter() {
 		matchIndex := make([]int, rf.serverNum)
 		copy(matchIndex, rf.matchIndex)
 		sort.Ints(matchIndex)
+		offset := rf.snapoffset
 		fmt.Printf("matchindex:%v\n", rf.matchIndex)
 		if rf.commitIndex >= matchIndex[rf.serverNum/2] {
 			fmt.Printf("no new commits\n")
@@ -114,15 +117,15 @@ func (rf *Raft) commiter() {
 			continue
 		}
 		index := matchIndex[rf.serverNum/2]
-		if rf.logs[index].Term < rf.term {
-			fmt.Printf("new match log%v, but old term%v not commit\n", rf.logs[index], rf.term)
+		if rf.logs[index-offset].Term < rf.term {
+			fmt.Printf("new match log%v, but old term%v not commit\n", rf.logs[index-offset], rf.term)
 			rf.rwmu.Unlock()
 			continue
 		}
 		i := 0
 		for rf.commitIndex < matchIndex[rf.serverNum/2] {
 			rf.commitIndex++
-			msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex].Command}
+			msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex-offset].Command}
 			rf.applyCh <- msg
 			fmt.Printf("me:%v once commit one new log %v\n", rf.me, rf.commitIndex)
 			i++
@@ -141,9 +144,18 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int)
 	rf.rwmu.Lock()
 	term := rf.term
 	index := startindex
+	offset := rf.snapoffset
+	if index < offset {
+		// 因为snapshot的原因，已经构建不出checklog了，logs[0]是已经commit的节点，还可以使用
+		// 如果要check负数，只能发送快照。
+		// 在test4D1里应该不需要考虑，因为follower一直连接状态，leader总是同步完成才commit的
+		fmt.Printf("me:%v log[%v] already snapshot, cant matchlog\n", rf.me, index)
+		rf.rwmu.Unlock()
+		return
+	}
 	i := 0
 	for i = 0; i < len(slogentry); i++ {
-		if slogentry[i].Term != rf.logs[index+i].Term {
+		if slogentry[i].Term != rf.logs[index+i-offset].Term {
 			break
 		}
 	}
@@ -151,7 +163,7 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int)
 	i = index
 	logentries := make([]LogEntry, rf.nextIndex-index)
 	for index < rf.nextIndex {
-		logentries[index-i] = rf.logs[index]
+		logentries[index-i] = rf.logs[index-offset]
 		index++
 	}
 	rf.matchIndex[server] = i - 1
@@ -252,13 +264,14 @@ func (rf *Raft) SyncLog(args *SyncLogEntryArgs, reply *SyncLogEntryReply) {
 		return
 	}
 	index := 0
+	offset := rf.snapoffset
 	// fmt.Printf("me:%v log before sync%v\n", rf.me, rf.logs)
 	for i := 0; i < len(args.Log); i++ {
 		index = args.Log[i].Index
 		// 修改这里赋值log的逻辑，注意不能用nextindex修改，而要用log的长度修改，
 		// 因为nextindex和log实际长度不对应会导致错误的append
-		if index < len(rf.logs) {
-			rf.logs[index] = args.Log[i]
+		if index-offset < len(rf.logs) {
+			rf.logs[index-offset] = args.Log[i]
 		} else {
 			rf.logs = append(rf.logs, args.Log[i])
 		}

@@ -75,6 +75,18 @@ func (ps *Persister) SnapshotSize() int {
 	return len(ps.snapshot)
 }
 
+func (ps *Persister) OnlySaveRaftstate(raftstate []byte) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	ps.raftstate = clone(raftstate)
+}
+
+func (ps *Persister) OnlySaveSnapshot(snapshot []byte) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	ps.snapshot = clone(snapshot)
+}
+
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
@@ -96,14 +108,19 @@ func (rf *Raft) persist() {
 	e.Encode(rf.commitIndex)
 	e.Encode(rf.snapoffset)
 	e.Encode(rf.nextIndex)
-	if rf.snapshot != nil {
-		if e.Encode(rf.snapshot.LastIndex) != nil || e.Encode(rf.snapshot.LastTerm) != nil {
-			fmt.Printf("me:%v Encode Raft State Failed\n", rf.me)
-		}
-		rf.persister.Save(w.Bytes(), rf.snapshot.Data)
-	} else {
-		rf.persister.Save(w.Bytes(), nil)
-	}
+	e.Encode(rf.snapshot.LastIndex)
+	e.Encode(rf.snapshot.LastTerm)
+
+	rf.persister.OnlySaveRaftstate(w.Bytes())
+	// rf.persister.Save(w.Bytes(), rf.snapshot.Data)
+	// if rf.snapshot != nil {
+	// 	if e.Encode(rf.snapshot.LastIndex) != nil || e.Encode(rf.snapshot.LastTerm) != nil {
+	// 		fmt.Printf("me:%v Encode Raft State Failed\n", rf.me)
+	// 	}
+	// 	rf.persister.Save(w.Bytes(), rf.snapshot.Data)
+	// } else {
+	// 	rf.persister.Save(w.Bytes(), nil)
+	// }
 }
 
 // restore previously persisted state.
@@ -121,6 +138,8 @@ func (rf *Raft) readPersist(data []byte) {
 	var CommitIndex int
 	var Snapoffset int
 	var NextIndex int
+	var LastIndex int
+	var LastTerm int
 
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
@@ -159,4 +178,13 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	rf.nextIndex = NextIndex
 
+	if err := d.Decode(&LastIndex); err != nil {
+		fmt.Printf("me:%v Read lastindex error:%v\n", rf.me, err)
+	}
+	rf.snapshot.LastIndex = LastIndex
+
+	if err := d.Decode(&LastTerm); err != nil {
+		fmt.Printf("me:%v Read lastterm error:%v\n", rf.me, err)
+	}
+	rf.snapshot.LastTerm = LastTerm
 }

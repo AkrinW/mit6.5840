@@ -171,7 +171,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.incheck = make([]bool, rf.serverNum)
 
 	rf.snapoffset = 0
-	rf.snapshot = nil
+	rf.snapshot = &Snapshot{0, 0, nil}
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.readSnapshot(persister.ReadSnapshot())

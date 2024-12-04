@@ -155,7 +155,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	term := rf.term
 	commitindex := rf.commitIndex
 	curindex := rf.nextIndex - 1
-	curterm := rf.logs[curindex].Term
+	offset := rf.snapoffset
+	// 所有rf.logs[]的操作都减去一个offset
+	curterm := rf.logs[curindex-offset].Term
 	_, exists := rf.voteTo[args.Term]
 
 	reply.Term = term
@@ -243,7 +245,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) startVote(server int) {
 	rf.rwmu.RLock()
 	term := rf.term
-	args := RequestVoteArgs{rf.me, term, rf.commitIndex, rf.nextIndex - 1, rf.logs[rf.nextIndex-1].Term}
+	args := RequestVoteArgs{rf.me, term, rf.commitIndex, rf.nextIndex - 1, rf.logs[rf.nextIndex-1-rf.snapoffset].Term}
 	reply := RequestVoteReply{}
 	rf.rwmu.RUnlock()
 	ok := false
@@ -316,9 +318,9 @@ func (rf *Raft) startHeartBeat(server int) {
 	rf.rwmu.RLock()
 	term := rf.term
 	commitindex := rf.commitIndex
-	commitlogterm := rf.logs[commitindex].Term
+	commitlogterm := rf.logs[commitindex-rf.snapoffset].Term
 	curindex := rf.nextIndex - 1
-	curlogterm := rf.logs[curindex].Term
+	curlogterm := rf.logs[curindex-rf.snapoffset].Term
 	rf.rwmu.RUnlock()
 
 	args := HeartbeatsArgs{rf.me, term, commitindex, commitlogterm, curindex, curlogterm}
@@ -387,13 +389,15 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 	defer rf.rwmu.Unlock()
 	term := rf.term
 	commitindex := rf.commitIndex
+	// 全程持有锁的情况，把offset拷贝出来
+	offset := rf.snapoffset
 	// nextindex := rf.nextIndex
 
 	reply.Me = rf.me
 	reply.Term = term
 	reply.CommitIndex = commitindex
 	reply.SLogEntries = make([]SimpleLogEntry, 0)
-
+	reply.Start = commitindex + 1
 	// 理一理heartbeat的流程，首先检查这个是不是过期的。commit是不是落后的leader
 	// 没有过期，commit也领先，可以准备commit
 	// 在一致性的前提下进行，首先需要保证follower的长度到commit，因为前面节点的数据没有传过来。
@@ -422,14 +426,14 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 	ResetTimer(rf.leaderTimer, 5, 1)
 
 	// follower进行commit
-	if args.CommitIndex < rf.nextIndex && args.CommitTerm == rf.logs[args.CommitIndex].Term {
+	if args.CommitIndex < rf.nextIndex && args.CommitTerm == rf.logs[args.CommitIndex-offset].Term {
 		// 添加commit次数限制 一次最多commit100条消息
 		i := 0
 		for rf.commitIndex < args.CommitIndex {
 			rf.commitIndex++
 			i++
 			fmt.Printf("me:%v commit log[%v]\n", rf.me, rf.commitIndex)
-			msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex].Command}
+			msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex-offset].Command}
 			rf.applyCh <- msg
 			if i == 100 {
 				break
@@ -462,7 +466,7 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 		if start+i >= len(rf.logs) {
 			break
 		}
-		reply.SLogEntries[i].Index = rf.logs[start+i].Index
-		reply.SLogEntries[i].Term = rf.logs[start+i].Term
+		reply.SLogEntries[i].Index = rf.logs[start+i-offset].Index
+		reply.SLogEntries[i].Term = rf.logs[start+i-offset].Term
 	}
 }
