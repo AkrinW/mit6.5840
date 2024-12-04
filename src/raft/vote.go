@@ -152,6 +152,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	reply.Me = rf.me
 	// 重新修改投票逻辑，先看任期，再看已commit长度，再看log长度，最后看是否已经投票
+	// 这个投票逻辑是错误的。。。按照论文要求，只需要比较最新的index的term和index即可
 	rf.rwmu.Lock()
 	defer rf.rwmu.Unlock()
 	term := rf.term
@@ -171,27 +172,39 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else if args.Term == term {
 		// 同一任期
 		if !exists {
-			if args.CommitIndex > commitindex {
-				reply.Vote = true
-			}
-			if args.CommitIndex == commitindex {
-				if args.CurTerm > curterm {
-					reply.Vote = true
-				}
-				if args.CurTerm == curterm && args.CurIndex >= curindex {
-					reply.Vote = true
-				}
-			}
-		}
-	} else {
-		if args.CommitIndex > commitindex {
-			reply.Vote = true
-		}
-		if args.CommitIndex == commitindex {
 			if args.CurTerm > curterm {
 				reply.Vote = true
 			}
-			if args.CurTerm == curterm && args.CurIndex >= curindex {
+			if args.CurTerm == curterm {
+				if args.CurIndex > curindex {
+					reply.Vote = true
+				}
+				if args.CurIndex == curindex && args.CommitIndex >= commitindex {
+					reply.Vote = true
+				}
+			} // 和注释里的原投票逻辑更改了一下顺序。。希望能完成测试
+
+			// if args.CommitIndex > commitindex {
+			// 	reply.Vote = true
+			// }
+			// if args.CommitIndex == commitindex {
+			// 	if args.CurTerm > curterm {
+			// 		reply.Vote = true
+			// 	}
+			// 	if args.CurTerm == curterm && args.CurIndex >= curindex {
+			// 		reply.Vote = true
+			// 	}
+			// }
+		}
+	} else {
+		if args.CurTerm > curterm {
+			reply.Vote = true
+		}
+		if args.CurTerm == curterm {
+			if args.CurIndex > curindex {
+				reply.Vote = true
+			}
+			if args.CurIndex == curindex && args.CommitIndex >= commitindex {
 				reply.Vote = true
 			}
 		}
@@ -369,13 +382,24 @@ func (rf *Raft) startHeartBeat(server int) {
 		return
 	}
 	if reply.CommitIndex > rf.commitIndex {
-		if rf.state != StateFollower {
-			ResetTimer(rf.heartbeatTimer, 300, 150)
-			ResetTimer(rf.voteTimer, 5, 1)
-			ResetTimer(rf.leaderTimer, 5, 1)
-			rf.state = StateFollower
+		// 出现oldcommit,不需要转为follower,而是直接commit自己的跟上进度
+		// 作为强leader，不可能从follower处更新自己的log，所以直接commmit就是了
+		// 添加commit次数限制 一次最多commit100条消息
+		i := 0
+		for rf.commitIndex < reply.CommitIndex {
+			if rf.killed() {
+				break
+			}
+			rf.commitIndex++
+			i++
+			fmt.Printf("me:%v commit log[%v]\n", rf.me, rf.commitIndex)
+			msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex-rf.snapoffset].Command}
+			rf.applyCh <- msg
+			if i == 100 {
+				break
+			}
 		}
-		return
+		rf.persist()
 	}
 	// still leader, check match
 
@@ -426,10 +450,11 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 		ResetTimer(rf.voteTimer, 1, 1)
 		ResetTimer(rf.leaderTimer, 1, 1)
 	}
-	if args.CommitIndex < commitindex {
-		fmt.Printf("%v is old commit leader, ignore\n", args.Me)
-		return
-	}
+	// // 改变选举策略后，不需要再检测commitindex了
+	// if args.CommitIndex < commitindex {
+	// 	fmt.Printf("%v is old commit leader, ignore\n", args.Me)
+	// 	return
+	// }
 	rf.state = StateFollower
 	ResetTimer(rf.heartbeatTimer, 300, 150)
 	ResetTimer(rf.voteTimer, 1, 1)
@@ -470,6 +495,12 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 	// 	return
 	// }
 	// fmt.Printf("me:%v need match %v to %v\n", rf.me, start, end)
+
+	// 这里遇到了奇怪的数组越界，原因是延迟rpc传来的curindex已经比followercommit的落后了，直接返回0即可
+	if args.CurIndex < rf.commitIndex {
+		fmt.Printf("me:%v old curindex%v < commitindex%v, ignore\n", rf.me, args.CurIndex, rf.commitIndex)
+		return
+	}
 	// 这里为什么follower是空的也能正常进入matchindex呢？
 	// 因为已经提前开辟了缺少的空间，len(log)的判定就不是0了
 	reply.SLogEntries = make([]SimpleLogEntry, end-start+1)

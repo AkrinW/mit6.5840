@@ -25,10 +25,11 @@ type SyncLogEntryArgs struct {
 }
 
 type SyncLogEntryReply struct {
-	Me         int
-	CurTerm    int
-	Flag       bool // 返回是否同步成功
-	IfOutedate bool
+	Me          int
+	CurTerm     int
+	Flag        bool // 返回是否同步成功
+	IfOutedate  bool
+	CommitIndex int
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -229,6 +230,26 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int)
 		rf.persist()
 		return
 	}
+	if reply.CommitIndex > rf.commitIndex {
+		// 出现oldcommit,不需要转为follower,而是直接commit自己的跟上进度
+		// 作为强leader，不可能从follower处更新自己的log，所以直接commmit就是了
+		// 添加commit次数限制 一次最多commit100条消息
+		i := 0
+		for rf.commitIndex < reply.CommitIndex {
+			if rf.killed() {
+				break
+			}
+			rf.commitIndex++
+			i++
+			fmt.Printf("me:%v commit log[%v]\n", rf.me, rf.commitIndex)
+			msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex-rf.snapoffset].Command}
+			rf.applyCh <- msg
+			if i == 100 {
+				break
+			}
+		}
+		rf.persist()
+	}
 	if reply.Flag && rf.matchIndex[server] < index-1 {
 		rf.matchIndex[server] = index - 1
 		fmt.Printf("me:%v in matchlog, change matchindex[%v]=%v\n", rf.me, server, index-1)
@@ -253,6 +274,7 @@ func (rf *Raft) SyncLog(args *SyncLogEntryArgs, reply *SyncLogEntryReply) {
 		reply.CurTerm = rf.term
 		return
 	}
+	reply.CommitIndex = rf.commitIndex
 	if args.CurTerm > rf.term {
 		rf.term = args.CurTerm
 		rf.persist()
@@ -307,5 +329,6 @@ func (rf *Raft) SyncLog(args *SyncLogEntryArgs, reply *SyncLogEntryReply) {
 			break
 		}
 	}
+	reply.CommitIndex = rf.commitIndex
 	rf.persist()
 }
