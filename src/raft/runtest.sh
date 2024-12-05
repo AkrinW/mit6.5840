@@ -16,7 +16,7 @@ if ! [[ "$iterations" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-output_file="output"  # 定义结果保存的文件名
+output_file="output-$test_type"  # 定义结果保存的文件名
 > "$output_file"  # 清空或创建 output 文件
 
 # 将完整的测试命令写入文件

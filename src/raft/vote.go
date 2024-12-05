@@ -217,6 +217,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			}
 		}
 		rf.term = args.Term
+		rf.TurntoFollower()
+
 		rf.persist()
 	}
 	reply.Term = rf.term
@@ -299,7 +301,7 @@ func (rf *Raft) startVote(server int, startterm int) {
 	// 检查是不是无效票
 	rf.rwmu.Lock()
 	defer rf.rwmu.Unlock()
-	fmt.Printf("me:%v revi term%v's vote from %v,curterm%v\n", rf.me, term, reply.Me, rf.term)
+	fmt.Printf("me:%v revi term%v's vote%v from %v,curterm%v\n", rf.me, term, reply.Vote, reply.Me, rf.term)
 	if rf.state != StateCandidate || rf.ifstopvote || term != rf.term {
 		return
 	}
