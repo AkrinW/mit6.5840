@@ -93,8 +93,9 @@ func (rf *Raft) runFollower() {
 	term := rf.term
 	fmt.Printf("me:%v term%v\n", rf.me, rf.term)
 	rf.voteTo[rf.term] = rf.me
-	rf.voteGets[rf.term] = 1
-	rf.voteDisagree[rf.term] = 0
+	rf.voteGets[rf.term] = make(map[int]bool, rf.serverNum)
+	rf.voteGets[rf.term][rf.me] = true
+	rf.voteDisagree[rf.term] = make(map[int]bool, rf.serverNum)
 	rf.ifstopvote = false
 	rf.persist()
 	ResetTimer(rf.voteTimer, 200, 400) // 时间重置需要和锁一起
@@ -135,7 +136,13 @@ func (rf *Raft) runCandidate() {
 		rf.TurntoFollower()
 		return
 	}
-	if rf.voteGets[rf.term] > rf.serverNum/2 {
+	sum := 0
+	for i := 0; i < rf.serverNum; i++ {
+		if rf.voteGets[rf.term][i] {
+			sum++
+		}
+	}
+	if sum > rf.serverNum/2 {
 		fmt.Printf("me:%v term%v become leader\n", rf.me, rf.term)
 		rf.state = StateLeader
 		// 变为leader后，启动一个goroutine检查是否进行commit
@@ -169,7 +176,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	offset := rf.snapoffset
 	// 所有rf.logs[]的操作都减去一个offset
 	curterm := rf.logs[curindex-offset].Term
-	_, exists := rf.voteTo[args.Term]
+	voteto, exists := rf.voteTo[args.Term]
 
 	reply.Term = term
 	reply.Vote = false
@@ -203,6 +210,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			// 		reply.Vote = true
 			// 	}
 			// }
+		} else if voteto == args.Me {
+			reply.Vote = true
 		}
 	} else {
 		if args.CurTerm > curterm {
@@ -306,16 +315,32 @@ func (rf *Raft) startVote(server int, startterm int) {
 		return
 	}
 
-	if reply.Vote {
-		rf.voteGets[term]++
-	} else {
-		rf.voteDisagree[term]++
+	if reply.Vote && !rf.voteGets[term][reply.Me] {
+		rf.voteGets[term][reply.Me] = true
+		sumagree := 0
+		for i := 0; i < rf.serverNum; i++ {
+			if rf.voteGets[rf.term][i] {
+				sumagree++
+			}
+		}
+		if sumagree > rf.serverNum/2 {
+			ResetTimer(rf.voteTimer, 1, 1)
+			rf.ifstopvote = true
+		}
+	} else if !reply.Vote && !rf.voteDisagree[term][reply.Me] {
+		rf.voteDisagree[term][reply.Me] = true
+		sumdisagree := 0
+		for i := 0; i < rf.serverNum; i++ {
+			if rf.voteGets[rf.term][i] {
+				sumdisagree++
+			}
+		}
+		if sumdisagree > rf.serverNum/2 {
+			ResetTimer(rf.voteTimer, 1, 1)
+			rf.ifstopvote = true
+		}
 	}
 	// 即时检查选票
-	if rf.voteGets[term] > rf.serverNum/2 || rf.voteDisagree[term] > rf.serverNum/2 {
-		ResetTimer(rf.voteTimer, 1, 1)
-		rf.ifstopvote = true
-	}
 }
 
 func (rf *Raft) runLeader() {
@@ -417,7 +442,7 @@ func (rf *Raft) startHeartBeat(server int, startterm int) {
 		}
 		return
 	}
-	if len(reply.SLogEntries) > 0 {
+	if len(reply.SLogEntries) > 0 && rf.matchIndex[server] < rf.nextIndex-1 {
 		if !rf.incheck[server] {
 			go rf.MatchLog(server, reply.SLogEntries, reply.Start, rf.term)
 		}

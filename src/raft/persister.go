@@ -105,7 +105,10 @@ func (rf *Raft) persist() {
 	e.Encode(rf.term)
 	e.Encode(rf.voteTo)
 	e.Encode(rf.logs)
-	e.Encode(rf.commitIndex)
+	// 对测试很无语。。3D后，每次crash必须从snapshot读取commitindex
+	// 在第一轮crash还没有创建snapshot时，commitindex就只能设置为0
+	// 意味着3A-3C也必须crash后从0开始commit了， 不知道还能不能通过
+	// e.Encode(rf.commitIndex)
 	e.Encode(rf.snapoffset)
 	e.Encode(rf.nextIndex)
 	e.Encode(rf.snapshot.LastIndex)
@@ -135,7 +138,7 @@ func (rf *Raft) readPersist(data []byte) {
 	var Term int
 	var Voteto map[int]int
 	var Log []LogEntry
-	var CommitIndex int
+	// var CommitIndex int
 	var Snapoffset int
 	var NextIndex int
 	var LastIndex int
@@ -161,11 +164,11 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	rf.logs = Log
 
-	if err := d.Decode(&CommitIndex); err != nil {
-		fmt.Printf("me:%v Read Commitindex error:%v\n", rf.me, err)
-		return
-	}
-	rf.commitIndex = CommitIndex
+	// if err := d.Decode(&CommitIndex); err != nil {
+	// 	fmt.Printf("me:%v Read Commitindex error:%v\n", rf.me, err)
+	// 	return
+	// }
+	// rf.commitIndex = CommitIndex
 
 	if err := d.Decode(&Snapoffset); err != nil {
 		fmt.Printf("me:%v Read snapoffset error:%v\n", rf.me, err)

@@ -64,7 +64,7 @@ func (rf *Raft) CallSnapshot(index int, snapshot []byte) {
 	snap := &Snapshot{}
 	snap.LastIndex = index
 	// 这里居然忘记也加offset了。。
-	snap.LastTerm = rf.logs[index-offset].Index
+	snap.LastTerm = rf.logs[index-offset].Term
 	snap.Data = make([]byte, len(snapshot))
 	copy(snap.Data, snapshot)
 	rf.snapshot = snap
@@ -89,6 +89,10 @@ func (rf *Raft) readSnapshot(data []byte) {
 	snap.Data = make([]byte, len(data))
 	copy(snap.Data, data)
 	rf.snapshot = snap
+	// 非常奇怪的地方。在3D之前，对于commit顺序的判定是从1号开始逐个比较是否正确。
+	// 而在3D有了snapshot后，每次crash重启会把applied[i]设置为snapshot的lastindex，因此之前commit的部分需要重新commit一遍
+	// 在这里把commitindex改成snap.lastindex即可，也不会影响3A-3C的测试
+	rf.commitIndex = snap.LastIndex
 }
 
 func (rf *Raft) InstallSnapshot(server int, startterm int) {
