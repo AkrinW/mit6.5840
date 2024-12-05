@@ -39,6 +39,7 @@ type HeartbeatsReply struct {
 	Me          int
 	Term        int // 返回自己的term给leader，如果leader发现自己落后了，就把自己变为follower
 	CommitIndex int // 返回自己的commitindex，给leader检查
+	CommitTerm  int
 	// IfNeedMatch bool             // 返回自己是否需要同步
 	SLogEntries []SimpleLogEntry //返回从commit开始的所有log，用于比较一致性
 	Start       int              // 用来提示slog的开头是哪个index
@@ -50,7 +51,7 @@ type HeartbeatsReply struct {
 
 // 需要注意数据争用的问题，比较关键的数据类型每次读或写都需要加锁，保证原子性
 func (rf *Raft) ticker() {
-	ResetTimer(rf.heartbeatTimer, 200, 150)
+	ResetTimer(rf.heartbeatTimer, 250, 100)
 	for !rf.killed() {
 		// Your code here (3A)
 		// Check if a leader election should be started.
@@ -89,13 +90,14 @@ func (rf *Raft) runFollower() {
 	rf.state = StateCandidate
 	// 开始投票，初始化自己的选票状态
 	rf.term++
+	term := rf.term
 	fmt.Printf("me:%v term%v\n", rf.me, rf.term)
 	rf.voteTo[rf.term] = rf.me
 	rf.voteGets[rf.term] = 1
 	rf.voteDisagree[rf.term] = 0
 	rf.ifstopvote = false
 	rf.persist()
-	ResetTimer(rf.voteTimer, 400, 400) // 时间重置需要和锁一起
+	ResetTimer(rf.voteTimer, 200, 400) // 时间重置需要和锁一起
 
 	rf.rwmu.Unlock()
 
@@ -104,8 +106,15 @@ func (rf *Raft) runFollower() {
 		if i == rf.me {
 			continue
 		}
-		go rf.startVote(i)
+		go rf.startVote(i, term)
 	}
+}
+
+func (rf *Raft) TurntoFollower() {
+	rf.state = StateFollower
+	ResetTimer(rf.heartbeatTimer, 250, 100)
+	ResetTimer(rf.voteTimer, 1, 1)
+	ResetTimer(rf.leaderTimer, 1, 1)
 }
 
 func (rf *Raft) runCandidate() {
@@ -123,7 +132,7 @@ func (rf *Raft) runCandidate() {
 	rf.ifstopvote = true
 	if rf.state == StateFollower {
 		fmt.Printf("me:%v become follower\n", rf.me)
-		ResetTimer(rf.heartbeatTimer, 200, 150)
+		rf.TurntoFollower()
 		return
 	}
 	if rf.voteGets[rf.term] > rf.serverNum/2 {
@@ -141,8 +150,7 @@ func (rf *Raft) runCandidate() {
 		// go rf.commiter()
 	} else {
 		fmt.Printf("me:%v term%v vote failed\n", rf.me, rf.term)
-		rf.state = StateFollower
-		ResetTimer(rf.heartbeatTimer, 200, 150)
+		rf.TurntoFollower()
 	}
 	rf.persist()
 }
@@ -211,15 +219,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.term = args.Term
 		rf.persist()
 	}
-
+	reply.Term = rf.term
 	if reply.Vote {
-		ResetTimer(rf.heartbeatTimer, 300, 150)
+		rf.TurntoFollower()
 		rf.voteTo[args.Term] = args.Me
-		if rf.state != StateFollower {
-			rf.state = StateFollower
-			ResetTimer(rf.voteTimer, 1, 1)
-			ResetTimer(rf.leaderTimer, 1, 1)
-		}
 		fmt.Printf("me:%v vote %v, term%v\n", rf.me, args.Me, reply.Term)
 		rf.persist()
 	}
@@ -257,7 +260,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-func (rf *Raft) startVote(server int) {
+func (rf *Raft) startVote(server int, startterm int) {
 	rf.rwmu.RLock()
 	term := rf.term
 	args := RequestVoteArgs{rf.me, term, rf.commitIndex, rf.nextIndex - 1, rf.logs[rf.nextIndex-1-rf.snapoffset].Term}
@@ -265,6 +268,9 @@ func (rf *Raft) startVote(server int) {
 	rf.rwmu.RUnlock()
 	ok := false
 	rpccount := 0
+	if startterm != term {
+		return
+	}
 	for !ok {
 		// send失败在test中说明对方断连了，直接中止代码
 		// TestUnreliable3C后，正常rpc也有可能失败，怎么区分rpc失败和断连呢？
@@ -277,12 +283,7 @@ func (rf *Raft) startVote(server int) {
 			defer rf.rwmu.Unlock()
 			if rf.term < reply.Term {
 				rf.term = reply.Term
-				ResetTimer(rf.heartbeatTimer, 300, 150)
-				if rf.state != StateFollower {
-					rf.state = StateFollower
-					ResetTimer(rf.voteTimer, 1, 1)
-					ResetTimer(rf.leaderTimer, 1, 1)
-				}
+				rf.TurntoFollower()
 				rf.persist()
 			}
 			return
@@ -291,13 +292,14 @@ func (rf *Raft) startVote(server int) {
 		// fmt.Printf("me%v requestvote %v failed\n", rf.me, server)
 		// 尝试给rpc次数增加限制。
 		// 投票时间最长1000ms，超过这个次数投票时间也已经结束，可以退出
-		if rpccount > 15 {
+		if rpccount > 6 {
 			return
 		}
 	}
 	// 检查是不是无效票
 	rf.rwmu.Lock()
 	defer rf.rwmu.Unlock()
+	fmt.Printf("me:%v revi term%v's vote from %v,curterm%v\n", rf.me, term, reply.Me, rf.term)
 	if rf.state != StateCandidate || rf.ifstopvote || term != rf.term {
 		return
 	}
@@ -319,21 +321,28 @@ func (rf *Raft) runLeader() {
 	if rf.killed() {
 		return
 	}
+	rf.mu.Lock()
+	startterm := rf.term
+	rf.mu.Unlock()
 	for i := 0; i < rf.serverNum; i++ {
 		if i == rf.me {
 			continue
 		}
-		go rf.startHeartBeat(i)
+		go rf.startHeartBeat(i, startterm)
 	}
 
 	ResetTimer(rf.leaderTimer, 100, 1)
 	<-rf.leaderTimer.C
 }
 
-func (rf *Raft) startHeartBeat(server int) {
+func (rf *Raft) startHeartBeat(server int, startterm int) {
 	// 这里修改 因为存在锁释放又获取的情况，nextindex可能在这段时间改变
 	// 所以为了避免错误修改，只获取函数执行时的index，并在后面检查是否需要修改
 	rf.rwmu.RLock()
+	if rf.state != StateLeader || rf.term != startterm {
+		rf.rwmu.RUnlock()
+		return
+	}
 	term := rf.term
 	commitindex := rf.commitIndex
 	commitlogterm := rf.logs[commitindex-rf.snapoffset].Term
@@ -349,19 +358,14 @@ func (rf *Raft) startHeartBeat(server int) {
 	rpccount := 0
 	// fmt.Printf("heatbeatsreplyRPC%v\n", reply)
 	for !ok {
-		// fmt.Printf("server%v unconnect, return\n", server)
+		// fmt.Printf("me:%v send heartbeat to server%v \n", rf.me, server)
 		ok = rf.peers[server].Call("Raft.HeartBeat", &args, &reply)
 		if reply.IfOutedate {
 			rf.rwmu.Lock()
 			defer rf.rwmu.Unlock()
 			if rf.term < reply.Term {
 				rf.term = reply.Term
-				ResetTimer(rf.heartbeatTimer, 300, 150)
-				if rf.state != StateFollower {
-					rf.state = StateFollower
-					ResetTimer(rf.voteTimer, 1, 1)
-					ResetTimer(rf.leaderTimer, 1, 1)
-				}
+				rf.TurntoFollower()
 				rf.persist()
 			}
 			return
@@ -377,11 +381,20 @@ func (rf *Raft) startHeartBeat(server int) {
 	defer rf.rwmu.Unlock()
 
 	// check if still leader
-	if term < rf.term {
+	if term < rf.term || reply.Term != rf.term || rf.state != StateLeader {
 		// 自己已经是旧的term了，不要执行任何行为
 		return
 	}
-	if reply.CommitIndex > rf.commitIndex {
+	if reply.CommitIndex > rf.commitIndex && reply.Term == rf.term {
+		// 保底检查一遍，对方的committerm是否与自己一致，存在落后leader收到对方已commit的情况
+		// 这时候leader强制转为follower
+		tmpterm := rf.logs[reply.CommitIndex-rf.snapoffset].Term
+		if reply.CommitTerm != tmpterm {
+			fmt.Printf("me:%v leader wrong commit[%v] term%v from reply%v, become follower\n", rf.me, reply.CommitIndex, tmpterm, reply.CommitTerm)
+			rf.TurntoFollower()
+			return
+		}
+
 		// 出现oldcommit,不需要转为follower,而是直接commit自己的跟上进度
 		// 作为强leader，不可能从follower处更新自己的log，所以直接commmit就是了
 		// 添加commit次数限制 一次最多commit100条消息
@@ -392,7 +405,7 @@ func (rf *Raft) startHeartBeat(server int) {
 			}
 			rf.commitIndex++
 			i++
-			fmt.Printf("me:%v commit log[%v]\n", rf.me, rf.commitIndex)
+			fmt.Printf("me:%v commit log[%v] func:startHeartBeat\n", rf.me, rf.commitIndex)
 			msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex-rf.snapoffset].Command}
 			rf.applyCh <- msg
 			if i == 100 {
@@ -402,18 +415,17 @@ func (rf *Raft) startHeartBeat(server int) {
 		rf.persist()
 	}
 	// still leader, check match
+	// 不需要check，说明follower同步到了最新的curindex，把信息更新到leader中
+	// 原本设计为matchindex[]不会下降的情况，尝试改为实时更新型
+	// 还是修改成不会下降的情况，因为在leader的同一term内，matchindex是不会下降的，过时的忽略即可
+	if rf.matchIndex[server] < reply.Start-1 {
+		rf.matchIndex[server] = reply.Start - 1
+		rf.commiter() // 有更新，检查一次commit
+	}
 
 	if len(reply.SLogEntries) > 0 {
 		if !rf.incheck[server] {
-			go rf.MatchLog(server, reply.SLogEntries, reply.Start)
-		}
-	} else {
-		// 不需要check，说明follower同步到了最新的curindex，把信息更新到leader中
-		// 原本设计为matchindex[]不会下降的情况，尝试改为实时更新型
-		// 还是修改成不会下降的情况，因为在leader的同一term内，matchindex是不会下降的，过时的忽略即可
-		if rf.matchIndex[server] < reply.Start-1 {
-			rf.matchIndex[server] = reply.Start - 1
-			rf.commiter() // 有更新，检查一次commit
+			go rf.MatchLog(server, reply.SLogEntries, reply.Start, rf.term)
 		}
 	}
 }
@@ -430,6 +442,7 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 	reply.Me = rf.me
 	reply.Term = term
 	reply.CommitIndex = commitindex
+	reply.CommitTerm = rf.logs[commitindex-offset].Term
 	reply.SLogEntries = make([]SimpleLogEntry, 0)
 	reply.Start = commitindex + 1
 	// 理一理heartbeat的流程，首先检查这个是不是过期的。commit是不是落后的leader
@@ -445,20 +458,14 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 	} else if args.Term > term {
 		rf.term = args.Term
 		rf.persist()
-		rf.state = StateFollower
-		ResetTimer(rf.heartbeatTimer, 300, 150)
-		ResetTimer(rf.voteTimer, 1, 1)
-		ResetTimer(rf.leaderTimer, 1, 1)
 	}
+	reply.Term = rf.term
 	// // 改变选举策略后，不需要再检测commitindex了
 	// if args.CommitIndex < commitindex {
 	// 	fmt.Printf("%v is old commit leader, ignore\n", args.Me)
 	// 	return
 	// }
-	rf.state = StateFollower
-	ResetTimer(rf.heartbeatTimer, 300, 150)
-	ResetTimer(rf.voteTimer, 1, 1)
-	ResetTimer(rf.leaderTimer, 1, 1)
+	rf.TurntoFollower()
 
 	// follower进行commit
 	if args.CommitIndex < rf.nextIndex && args.CommitTerm == rf.logs[args.CommitIndex-offset].Term {
@@ -470,7 +477,7 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 			}
 			rf.commitIndex++
 			i++
-			fmt.Printf("me:%v commit log[%v]\n", rf.me, rf.commitIndex)
+			fmt.Printf("me:%v commit log[%v] func:Heartbeat\n", rf.me, rf.commitIndex)
 			msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex-offset].Command}
 			rf.applyCh <- msg
 			if i == 100 {
@@ -478,6 +485,7 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 			}
 		}
 		reply.CommitIndex = rf.commitIndex
+		reply.CommitTerm = rf.logs[commitindex-offset].Term
 		rf.persist()
 	}
 
@@ -513,4 +521,6 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 		reply.SLogEntries[i].Index = rf.logs[start+i-offset].Index
 		reply.SLogEntries[i].Term = rf.logs[start+i-offset].Term
 	}
+	// fmt.Printf("me:%v args:%v reply:%v %v\n", rf.me, args, reply.CommitIndex, reply.Start)
+
 }

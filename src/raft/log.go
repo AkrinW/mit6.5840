@@ -30,6 +30,7 @@ type SyncLogEntryReply struct {
 	Flag        bool // 返回是否同步成功
 	IfOutedate  bool
 	CommitIndex int
+	CommitTerm  int
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -138,10 +139,14 @@ func (rf *Raft) commiter() {
 	rf.persist()
 }
 
-func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int) {
+func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int, startterm int) {
 	// 先一个个往前遍历，寻找最后一个同步的节点
 	// leader向follower从后往前发送index与term，找到第一个相同的。
 	rf.rwmu.Lock()
+	if rf.state != StateLeader || startterm != rf.term {
+		rf.rwmu.Unlock()
+		return
+	}
 	term := rf.term
 	index := startindex
 	offset := rf.snapoffset
@@ -189,15 +194,10 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int)
 		if reply.IfOutedate {
 			rf.rwmu.Lock()
 			defer rf.rwmu.Unlock()
+			rf.incheck[server] = false
 			if rf.term < reply.CurTerm {
 				rf.term = reply.CurTerm
-				rf.incheck[server] = false
-				ResetTimer(rf.heartbeatTimer, 500, 150)
-				if rf.state != StateFollower {
-					rf.state = StateFollower
-					ResetTimer(rf.voteTimer, 5, 1)
-					ResetTimer(rf.leaderTimer, 5, 1)
-				}
+				rf.TurntoFollower()
 				rf.persist()
 			}
 			return
@@ -218,22 +218,28 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int)
 	rf.rwmu.Lock()
 	defer rf.rwmu.Unlock()
 	rf.incheck[server] = false
+	if rf.term != term || rf.state != StateLeader {
+		return
+	}
 	if rf.term < reply.CurTerm {
 		fmt.Printf("me:%v is old term, change to follower\n", rf.me)
 		rf.term = reply.CurTerm
-		if rf.state != StateFollower {
-			rf.state = StateFollower
-			ResetTimer(rf.heartbeatTimer, 500, 150)
-			ResetTimer(rf.leaderTimer, 5, 1)
-			ResetTimer(rf.voteTimer, 5, 1)
-		}
+		rf.TurntoFollower()
 		rf.persist()
 		return
 	}
-	if reply.CommitIndex > rf.commitIndex {
+	if reply.CommitIndex > rf.commitIndex && reply.CurTerm == rf.term {
+		tmpterm := rf.logs[reply.CommitIndex-rf.snapoffset].Term
+		if reply.CommitTerm != tmpterm {
+			fmt.Printf("me:%v leader wrong commit[%v] term%v from reply%v, become follower\n", rf.me, reply.CommitIndex, tmpterm, reply.CommitTerm)
+			rf.TurntoFollower()
+			return
+		}
+
 		// 出现oldcommit,不需要转为follower,而是直接commit自己的跟上进度
 		// 作为强leader，不可能从follower处更新自己的log，所以直接commmit就是了
 		// 添加commit次数限制 一次最多commit100条消息
+
 		i := 0
 		for rf.commitIndex < reply.CommitIndex {
 			if rf.killed() {
@@ -241,7 +247,7 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int)
 			}
 			rf.commitIndex++
 			i++
-			fmt.Printf("me:%v commit log[%v]\n", rf.me, rf.commitIndex)
+			fmt.Printf("me:%v commit log[%v] func:Matchlog\n", rf.me, rf.commitIndex)
 			msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex-rf.snapoffset].Command}
 			rf.applyCh <- msg
 			if i == 100 {
@@ -272,19 +278,16 @@ func (rf *Raft) SyncLog(args *SyncLogEntryArgs, reply *SyncLogEntryReply) {
 		// old request , refuse
 		fmt.Printf("me:%v reci old leader check match,ignore\n", rf.me)
 		reply.CurTerm = rf.term
+		reply.IfOutedate = true
 		return
 	}
 	reply.CommitIndex = rf.commitIndex
+	reply.CommitTerm = rf.logs[rf.commitIndex-rf.snapoffset].Term
 	if args.CurTerm > rf.term {
 		rf.term = args.CurTerm
 		rf.persist()
 	}
-	if rf.state != StateFollower {
-		rf.state = StateFollower
-		ResetTimer(rf.voteTimer, 5, 1)
-		ResetTimer(rf.leaderTimer, 5, 1)
-	}
-	ResetTimer(rf.heartbeatTimer, 500, 150)
+	rf.TurntoFollower()
 	if len(args.Log) == 0 {
 		fmt.Printf("me:%v sync nothing\n", rf.me)
 		return
@@ -322,7 +325,7 @@ func (rf *Raft) SyncLog(args *SyncLogEntryArgs, reply *SyncLogEntryReply) {
 		}
 		rf.commitIndex++
 		i++
-		fmt.Printf("me:%v commit log[%v]\n", rf.me, rf.commitIndex)
+		fmt.Printf("me:%v commit log[%v] func: SyncLog\n", rf.me, rf.commitIndex)
 		msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex-offset].Command}
 		rf.applyCh <- msg
 		if i == 100 {
@@ -330,5 +333,6 @@ func (rf *Raft) SyncLog(args *SyncLogEntryArgs, reply *SyncLogEntryReply) {
 		}
 	}
 	reply.CommitIndex = rf.commitIndex
+	reply.CommitTerm = rf.logs[rf.commitIndex-offset].Term
 	rf.persist()
 }
