@@ -11,6 +11,32 @@ type Snapshot struct {
 	Data []byte
 }
 
+type InstallSnapshotArgs struct {
+	Me          int
+	CurTerm     int
+	InstallSnap Snapshot
+}
+
+type InstallSnapshotReply struct {
+	Me         int
+	CurTerm    int
+	Flag       bool
+	IfOutedate bool
+}
+
+// snapshot有[]byte,所以需要深拷贝
+// interface{}进行深拷贝有点复杂，还是不传递interface
+// 这样的结果是follower在logs[0]对应的command数据可能是错误的。
+// 应对策略是在snapshot之外避免对logs[0]进行操作，包括取log同步等
+func DeepCopySnap(origin *Snapshot) Snapshot {
+	copySnap := Snapshot{origin.LastIndex, origin.LastTerm, nil}
+	if origin.Data != nil {
+		copySnap.Data = make([]byte, len(origin.Data))
+		copy(copySnap.Data, origin.Data)
+	}
+	return copySnap
+}
+
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -63,4 +89,118 @@ func (rf *Raft) readSnapshot(data []byte) {
 	snap.Data = make([]byte, len(data))
 	copy(snap.Data, data)
 	rf.snapshot = snap
+}
+
+func (rf *Raft) InstallSnapshot(server int, startterm int) {
+	rf.rwmu.Lock()
+	if rf.state != StateLeader || startterm != rf.term {
+		rf.rwmu.Unlock()
+		return
+	}
+	term := rf.term
+	rf.ininstallsnap[server] = true
+	snap := DeepCopySnap(rf.snapshot)
+	args := InstallSnapshotArgs{rf.me, term, snap}
+	reply := InstallSnapshotReply{}
+	rf.rwmu.Unlock()
+
+	fmt.Printf("me:%v in term%v send snapshot{%v %v} to %v\n", rf.me, term, snap.LastIndex, snap.LastTerm, server)
+	ok := false
+	rpccount := 0
+	for !ok {
+		ok = rf.sendSnapshot(server, &args, &reply)
+		if reply.IfOutedate {
+			rf.rwmu.Lock()
+			defer rf.rwmu.Unlock()
+			rf.ininstallsnap[server] = false
+			if rf.term < reply.CurTerm {
+				rf.term = reply.CurTerm
+				rf.TurntoFollower()
+				rf.persist()
+			}
+			return
+		}
+		rpccount++
+		if rpccount > 3 {
+			rf.rwmu.Lock()
+			rf.ininstallsnap[server] = false
+			rf.rwmu.Unlock()
+			return
+		}
+	}
+
+	// 检查自己是否过时了
+	rf.rwmu.Lock()
+	defer rf.rwmu.Unlock()
+	rf.ininstallsnap[server] = false
+	if rf.term != term || rf.state != StateLeader {
+		return
+	}
+	if rf.term < reply.CurTerm {
+		fmt.Printf("me:%v is old term, change to follower\n", rf.me)
+		rf.term = reply.CurTerm
+		rf.TurntoFollower()
+		rf.persist()
+		return
+	}
+	if reply.Flag && rf.matchIndex[server] < snap.LastIndex {
+		rf.matchIndex[server] = snap.LastIndex
+		fmt.Printf("me:%v in InstallSnapshot, change matchindex[%v]=%v\n", rf.me, server, snap.LastIndex)
+		// 这里不应该进行commit确认，因为靠install snapshot, matchindex最多只能到rf.commitindex的位置，无法进一步commit
+		// rf.commiter()
+	}
+}
+
+func (rf *Raft) sendSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.FollowerInstallSnapshot", args, reply)
+	return ok
+}
+
+func (rf *Raft) FollowerInstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	reply.Me = rf.me
+	reply.CurTerm = args.CurTerm
+	reply.Flag = false
+	rf.rwmu.Lock()
+	defer rf.rwmu.Unlock()
+	if args.CurTerm < rf.term {
+		// old request , refuse
+		fmt.Printf("me:%v reci old leader install snapshot, ignore\n", rf.me)
+		reply.CurTerm = rf.term
+		reply.IfOutedate = true
+	} else {
+		if args.CurTerm > rf.term {
+			rf.term = args.CurTerm
+			rf.persist()
+		}
+		rf.TurntoFollower()
+	}
+	if args.InstallSnap.LastIndex <= rf.snapshot.LastIndex {
+		fmt.Printf("me:%v reci old snapshot, do not install\n", rf.me)
+		return
+	}
+	// 传来的snapshot比已有的更新，就进行替换和log压缩
+	snap := DeepCopySnap(&args.InstallSnap)
+	rf.snapshot = &snap
+	if snap.LastIndex < rf.nextIndex {
+		rf.logs = rf.logs[snap.LastIndex-rf.snapoffset:]
+	} else {
+		rf.logs = make([]LogEntry, 1)
+		rf.logs[0].Index = snap.LastIndex
+		rf.logs[0].Term = snap.LastTerm
+		rf.nextIndex = snap.LastIndex + 1
+	}
+	rf.snapoffset = snap.LastIndex
+
+	reply.Flag = true
+	if snap.LastIndex <= rf.commitIndex {
+		fmt.Printf("me:%v snapshot is older than commmit index\n", rf.me)
+	} else {
+		fmt.Printf("me:%v newer snapshot%v, commit it\n", rf.me, snap.LastIndex)
+		fmt.Printf("me:%v commit log[%v]-log[%v] func:FollowerInstallSnapshot\n", rf.me, rf.commitIndex, snap.LastIndex)
+		msg := ApplyMsg{SnapshotValid: true, Snapshot: snap.Data, SnapshotIndex: snap.LastIndex, SnapshotTerm: snap.LastTerm}
+		rf.applyCh <- msg
+		rf.commitIndex = snap.LastIndex
+	}
+	rf.persist()
+	rf.persister.OnlySaveSnapshot(rf.snapshot.Data)
 }

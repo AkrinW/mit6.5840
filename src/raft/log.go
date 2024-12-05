@@ -92,11 +92,29 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// go rf.syncLog(index, term)
 }
 
+func (rf *Raft) committochan(targetindex int, funcname string) {
+	// 限制一次最多commit 100条log
+	i := 0
+	for rf.commitIndex < targetindex {
+		if rf.killed() {
+			return
+		}
+		rf.commitIndex++
+		i++
+		fmt.Printf("me:%v commit log[%v] func:%v\n", rf.me, rf.commitIndex, funcname)
+		msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex-rf.snapoffset].Command}
+		rf.applyCh <- msg
+		if i == 100 {
+			return
+		}
+	}
+	rf.persist()
+}
+
 // 为何commiter需要单独一个goroutine？
 // follower在heartbeat时就进行commit，leader同样只需要在这种时候执行
 // 没有锁的释放或获取，可以更安全
 // 本质是checkmatch对可提交的进行commit，在每次更新commit时执行一次就行了。
-
 func (rf *Raft) commiter() {
 	if rf.killed() {
 		return
@@ -125,18 +143,7 @@ func (rf *Raft) commiter() {
 		fmt.Printf("new match log%v but old, term%v not commit\n", rf.logs[index-offset], rf.term)
 		return
 	}
-	i := 0
-	for rf.commitIndex < matchIndex[rf.serverNum/2] {
-		rf.commitIndex++
-		msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex-offset].Command}
-		rf.applyCh <- msg
-		fmt.Printf("me:%v once commit one new log %v\n", rf.me, rf.commitIndex)
-		i++
-		if i == 100 {
-			break
-		}
-	}
-	rf.persist()
+	rf.committochan(matchIndex[rf.serverNum/2], "commiter")
 }
 
 func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int, startterm int) {
@@ -150,8 +157,8 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int,
 	term := rf.term
 	index := startindex
 	offset := rf.snapoffset
-	if index < offset {
-		// 因为snapshot的原因，已经构建不出checklog了，logs[0]是已经commit的节点，还可以使用
+	if index <= offset {
+		// 因为snapshot的原因，已经构建不出checklog了，logs[0]对应的command可能不对，不能使用
 		// 如果要check负数，只能发送快照。
 		// 在test4D1里应该不需要考虑，因为follower一直连接状态，leader总是同步完成才commit的
 		fmt.Printf("me:%v log[%v] already snapshot, cant matchlog\n", rf.me, index)
@@ -240,21 +247,7 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int,
 		// 作为强leader，不可能从follower处更新自己的log，所以直接commmit就是了
 		// 添加commit次数限制 一次最多commit100条消息
 
-		i := 0
-		for rf.commitIndex < reply.CommitIndex {
-			if rf.killed() {
-				break
-			}
-			rf.commitIndex++
-			i++
-			fmt.Printf("me:%v commit log[%v] func:Matchlog\n", rf.me, rf.commitIndex)
-			msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex-rf.snapoffset].Command}
-			rf.applyCh <- msg
-			if i == 100 {
-				break
-			}
-		}
-		rf.persist()
+		rf.committochan(reply.CommitIndex, "MatchLog")
 	}
 	if reply.Flag && rf.matchIndex[server] < index-1 {
 		rf.matchIndex[server] = index - 1
@@ -318,21 +311,7 @@ func (rf *Raft) SyncLog(args *SyncLogEntryArgs, reply *SyncLogEntryReply) {
 	// 对于落后的follower来说，进行的commit都是安全的
 
 	// 添加commit次数限制 一次最多commit100条消息
-	i := 0
-	for rf.commitIndex < args.CommitIndex {
-		if rf.killed() {
-			break
-		}
-		rf.commitIndex++
-		i++
-		fmt.Printf("me:%v commit log[%v] func: SyncLog\n", rf.me, rf.commitIndex)
-		msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex-offset].Command}
-		rf.applyCh <- msg
-		if i == 100 {
-			break
-		}
-	}
+	rf.committochan(args.CommitIndex, "SyncLog")
 	reply.CommitIndex = rf.commitIndex
 	reply.CommitTerm = rf.logs[rf.commitIndex-offset].Term
-	rf.persist()
 }

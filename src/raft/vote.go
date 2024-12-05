@@ -323,9 +323,9 @@ func (rf *Raft) runLeader() {
 	if rf.killed() {
 		return
 	}
-	rf.mu.Lock()
+	rf.rwmu.Lock()
 	startterm := rf.term
-	rf.mu.Unlock()
+	rf.rwmu.Unlock()
 	for i := 0; i < rf.serverNum; i++ {
 		if i == rf.me {
 			continue
@@ -396,25 +396,10 @@ func (rf *Raft) startHeartBeat(server int, startterm int) {
 			rf.TurntoFollower()
 			return
 		}
-
 		// 出现oldcommit,不需要转为follower,而是直接commit自己的跟上进度
 		// 作为强leader，不可能从follower处更新自己的log，所以直接commmit就是了
 		// 添加commit次数限制 一次最多commit100条消息
-		i := 0
-		for rf.commitIndex < reply.CommitIndex {
-			if rf.killed() {
-				break
-			}
-			rf.commitIndex++
-			i++
-			fmt.Printf("me:%v commit log[%v] func:startHeartBeat\n", rf.me, rf.commitIndex)
-			msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex-rf.snapoffset].Command}
-			rf.applyCh <- msg
-			if i == 100 {
-				break
-			}
-		}
-		rf.persist()
+		rf.committochan(reply.CommitIndex, "startHeartBeat")
 	}
 	// still leader, check match
 	// 不需要check，说明follower同步到了最新的curindex，把信息更新到leader中
@@ -424,7 +409,14 @@ func (rf *Raft) startHeartBeat(server int, startterm int) {
 		rf.matchIndex[server] = reply.Start - 1
 		rf.commiter() // 有更新，检查一次commit
 	}
-
+	// 在heartbeat时检查follower的commitindex，如果它落后到无法用matchlog同步
+	// 就先调用installsnap同步
+	if reply.Start <= rf.snapoffset {
+		if !rf.ininstallsnap[server] {
+			go rf.InstallSnapshot(server, rf.term)
+		}
+		return
+	}
 	if len(reply.SLogEntries) > 0 {
 		if !rf.incheck[server] {
 			go rf.MatchLog(server, reply.SLogEntries, reply.Start, rf.term)
@@ -469,26 +461,12 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 	// }
 	rf.TurntoFollower()
 
-	// follower进行commit
-	if args.CommitIndex < rf.nextIndex && args.CommitTerm == rf.logs[args.CommitIndex-offset].Term {
+	// follower进行commit, 需要检查自己是不是落后的
+	if args.CommitIndex < rf.nextIndex && args.CommitIndex > offset && args.CommitTerm == rf.logs[args.CommitIndex-offset].Term {
 		// 添加commit次数限制 一次最多commit100条消息
-		i := 0
-		for rf.commitIndex < args.CommitIndex {
-			if rf.killed() {
-				break
-			}
-			rf.commitIndex++
-			i++
-			fmt.Printf("me:%v commit log[%v] func:Heartbeat\n", rf.me, rf.commitIndex)
-			msg := ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.logs[rf.commitIndex-offset].Command}
-			rf.applyCh <- msg
-			if i == 100 {
-				break
-			}
-		}
+		rf.committochan(args.CommitIndex, "HeartBeat")
 		reply.CommitIndex = rf.commitIndex
 		reply.CommitTerm = rf.logs[commitindex-offset].Term
-		rf.persist()
 	}
 
 	// 确定需要matchindex的范围

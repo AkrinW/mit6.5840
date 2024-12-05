@@ -86,8 +86,9 @@ type Raft struct {
 	nextIndex   int        //下一个要写入的下标
 	incheck     []bool     // 这个用来表示某个follower是否正在check中，避免心跳重复执行checklog
 
-	snapshot   *Snapshot
-	snapoffset int // 用来记录snapshot的偏移量
+	snapshot      *Snapshot
+	snapoffset    int    // 用来记录snapshot的偏移量
+	ininstallsnap []bool //用来记录某个server是否正在下载snapshot
 }
 
 func ResetTimer(t *time.Timer, a int32, b int32) {
@@ -175,6 +176,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.readSnapshot(persister.ReadSnapshot())
+	rf.ininstallsnap = make([]bool, rf.serverNum)
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
