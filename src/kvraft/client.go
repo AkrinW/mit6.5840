@@ -31,7 +31,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	// You'll have to add code here.
 	ck.serverNum = len(servers)
-	ck.clientID = nrand()
+	ck.clientID = nrand() % 100
 	ck.transcationID = 0
 	ck.leaderID = 0
 	return ck
@@ -73,19 +73,19 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// args.Print()
 	ck.CallServer(&args, &reply)
 	fmt.Printf("cl%v %v complete\n", ck.clientID, op)
-	if op == APPEND {
-		ck.Report()
-	}
+	// if op == APPEND {
+	// 	ck.Report()
+	// }
 }
 
-func (ck *Clerk) Report() {
-	ck.transcationID++
-	args := KVArgs{ck.clientID, ck.transcationID, REPORT, "", ""}
-	reply := KVReply{}
-	// args.Print()
-	ck.CallServer(&args, &reply)
-	fmt.Printf("cl%v %v complete\n", ck.clientID, REPORT)
-}
+// func (ck *Clerk) Report() {
+// 	ck.transcationID++
+// 	args := KVArgs{ck.clientID, ck.transcationID, REPORT, "", ""}
+// 	reply := KVReply{}
+// 	// args.Print()
+// 	ck.CallServer(&args, &reply)
+// 	fmt.Printf("cl%v %v complete\n", ck.clientID, REPORT)
+// }
 
 func (ck *Clerk) Put(key string, value string) {
 	ck.PutAppend(key, value, PUT)
@@ -110,13 +110,13 @@ func (ck *Clerk) CallServer(args *KVArgs, reply *KVReply) {
 			}
 			continue
 		}
-		if reply.Err == ErrNoKey || reply.Err == ErrTermchanged {
-			fmt.Printf("cl%v %v to srv%v failed:%v\n", ck.clientID, op, curserver, reply.Err)
-			continue
-		}
 		if reply.Err == OK {
 			fmt.Printf("cl%v %v to srv%v succeed\n", ck.clientID, op, curserver)
 			break
+		}
+		if reply.Err == ErrNoKey || reply.Err == ErrTermchanged {
+			fmt.Printf("cl%v %v to srv%v failed:%v\n", ck.clientID, op, curserver, reply.Err)
+			continue
 		}
 	}
 	if leader != curserver {

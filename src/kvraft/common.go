@@ -21,6 +21,7 @@ const (
 	ErrKilled      = "ErrKilled"
 	ErrTermchanged = "ErrTermchanged"
 	ErrNotcommit   = "ErrNotcommit"
+	ErrCompleted   = "ErrCompleted"
 )
 
 const (

@@ -22,9 +22,10 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	DataBase    map[string]string
-	HistoryData map[int64]string
-	HistoryTran map[int64]int
+	DataBase map[string]string
+	// HistoryData map[int64]string
+	HistoryTran map[int64]map[int]int
+	CurTran     map[int64]int
 	CommitedOp  []Op
 	// RaftTerm    int
 }
@@ -58,7 +59,7 @@ func (kv *KVServer) Put(args *KVArgs, reply *KVReply) {
 		fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
 		return
 	}
-	reply.Value = command.Value
+	// reply.Value = command.Value
 
 	// kv.HistoryTran[args.ClientID] = args.TranscationID
 	// kv.DataBase[args.Key] = args.Value
@@ -76,7 +77,6 @@ func (kv *KVServer) Append(args *KVArgs, reply *KVReply) {
 		fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
 		return
 	}
-	reply.Value = command.Value
 
 	// kv.HistoryTran[args.ClientID] = args.TranscationID
 	// value, exists := kv.HistoryData[args.ClientID]
@@ -89,26 +89,40 @@ func (kv *KVServer) Append(args *KVArgs, reply *KVReply) {
 	// }
 }
 
-func (kv *KVServer) Report(args *KVArgs, reply *KVReply) {
-	// Your code here.
-	fmt.Printf("srv%v reci %v's Report Trans:%v\n", kv.me, args.ClientID, args.TranscationID)
-	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value, OK}
-	kv.submitCommand(&command)
+// func (kv *KVServer) Report(args *KVArgs, reply *KVReply) {
+// 	// Your code here.
+// 	fmt.Printf("srv%v reci %v's Report Trans:%v\n", kv.me, args.ClientID, args.TranscationID)
+// 	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value, OK}
+// 	kv.submitCommand(&command)
 
-	reply.ServerID = kv.me
-	reply.Err = command.Status
-	if reply.Err != OK {
-		fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
-		return
-	}
-	reply.Value = command.Value
+// 	reply.ServerID = kv.me
+// 	reply.Err = command.Status
+// 	if reply.Err != OK {
+// 		fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
+// 		return
+// 	}
+// 	reply.Value = command.Value
 
-	// kv.mu.Lock()
-	// defer kv.mu.Unlock()
-	// delete(kv.HistoryData, args.ClientID)
-}
+// 	// kv.mu.Lock()
+// 	// defer kv.mu.Unlock()
+// 	// delete(kv.HistoryData, args.ClientID)
+// }
 
 func (kv *KVServer) submitCommand(cmd *Op) {
+	kv.rwmu.RLock()
+	// unreliable环境，需要检查提交是否重复
+	// client没收到有多种情况。1.没发出去2.发出去但还在执行3.执行完了没传回来
+	if len(kv.HistoryTran[cmd.ClientID]) >= cmd.TranscationID {
+		// 已执行完成的cmd，直接返回已有结果
+		fmt.Printf("completed cmd%v, return\n", cmd)
+		cmd.Status = ErrCompleted
+		if cmd.Type == GET {
+			index := kv.HistoryTran[cmd.ClientID][cmd.TranscationID]
+			cmd.Value = kv.CommitedOp[index].Value
+			return
+		}
+	}
+	if kv.CurTran[cmd.ClientID] <
 	cmdindex, term, isLeader := kv.rf.Start(*cmd)
 	if !isLeader {
 		cmd.Status = ErrWrongLeader
@@ -117,8 +131,8 @@ func (kv *KVServer) submitCommand(cmd *Op) {
 
 	fmt.Printf("srv:%v submit cmd%v, index:%v term%v\n", kv.me, cmd, cmdindex, term)
 	for !kv.killed() {
-		time.Sleep(100 * time.Millisecond)
-		fmt.Printf("every100ms check if%v commit\n", cmdindex)
+		time.Sleep(10 * time.Millisecond)
+		// fmt.Printf("every10ms check if%v commit\n", cmdindex)
 		kv.rwmu.RLock()
 		commitOp := Op{}
 		if len(kv.CommitedOp) > cmdindex {
@@ -167,7 +181,7 @@ func (kv *KVServer) applier(applyCh chan raft.ApplyMsg) {
 		} else {
 			cmdindex := m.CommandIndex
 			cmd := m.Command.(Op)
-			fmt.Printf("srv:%v reci command[%v]:%v\n", kv.me, cmdindex, cmd)
+			// fmt.Printf("srv:%v reci command[%v]:%v\n", kv.me, cmdindex, cmd)
 			kv.applyCommand(cmdindex, &cmd)
 		}
 	}
@@ -177,25 +191,25 @@ func (kv *KVServer) applyCommand(index int, cmd *Op) {
 	kv.rwmu.Lock()
 	defer kv.rwmu.Unlock()
 
-	kv.HistoryTran[cmd.ClientID] = cmd.TranscationID
+	kv.HistoryTran[cmd.ClientID][cmd.TranscationID] = index
 	switch cmd.Type {
 	case GET:
 		cmd.Value = kv.DataBase[cmd.Key]
 	case PUT:
 		kv.DataBase[cmd.Key] = cmd.Value
 	case APPEND:
-		_, exists := kv.HistoryData[cmd.ClientID]
-		if !exists {
-			kv.HistoryData[cmd.ClientID] = kv.DataBase[cmd.Key]
-			kv.DataBase[cmd.Key] += cmd.Value
-		}
+		// _, exists := kv.HistoryData[cmd.ClientID]
+		// if !exists {
+		// kv.HistoryData[cmd.ClientID] = kv.DataBase[cmd.Key]
+		kv.DataBase[cmd.Key] += cmd.Value
+		// }
 	case REPORT:
-		delete(kv.HistoryData, cmd.ClientID)
+		// delete(kv.HistoryData, cmd.ClientID)
 	}
 
-	if len(kv.CommitedOp) != index {
-		fmt.Printf("CommitedIndex wrong expect%v actal %v\n", len(kv.CommitedOp), index)
-	}
+	// if len(kv.CommitedOp) != index {
+	// 	fmt.Printf("CommitedIndex wrong expect%v actal %v\n", len(kv.CommitedOp), index)
+	// }
 	kv.CommitedOp = append(kv.CommitedOp, *cmd)
 }
 
@@ -244,8 +258,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.DataBase = make(map[string]string)
-	kv.HistoryData = make(map[int64]string)
-	kv.HistoryTran = make(map[int64]int)
+	// kv.HistoryData = make(map[int64]string)
+	kv.HistoryTran = make(map[int64]map[int]int)
+	kv.CurTran = make(map[int64]int)
 	kv.CommitedOp = make([]Op, 1)
 
 	go kv.applier(kv.applyCh)

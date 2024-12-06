@@ -1,9 +1,5 @@
 package raft
 
-import (
-	"fmt"
-)
-
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
@@ -84,14 +80,14 @@ func (rf *Raft) runFollower() {
 	if rf.killed() {
 		return
 	}
-	fmt.Printf("me:%v heartbeater timeout\n", rf.me)
+	// fmt.Printf("me:%v heartbeater timeout\n", rf.me)
 
 	rf.rwmu.Lock()
 	rf.state = StateCandidate
 	// 开始投票，初始化自己的选票状态
 	rf.term++
 	term := rf.term
-	fmt.Printf("me:%v term%v\n", rf.me, rf.term)
+	// fmt.Printf("me:%v term%v\n", rf.me, rf.term)
 	rf.voteTo[rf.term] = rf.me
 	rf.voteGets[rf.term] = make(map[int]bool, rf.serverNum)
 	rf.voteGets[rf.term][rf.me] = true
@@ -129,10 +125,10 @@ func (rf *Raft) runCandidate() {
 	}
 	rf.rwmu.Lock()
 	defer rf.rwmu.Unlock()
-	fmt.Printf("me:%v vote time out, check if leader\n", rf.me)
+	// fmt.Printf("me:%v vote time out, check if leader\n", rf.me)
 	rf.ifstopvote = true
 	if rf.state == StateFollower {
-		fmt.Printf("me:%v become follower\n", rf.me)
+		// fmt.Printf("me:%v become follower\n", rf.me)
 		rf.TurntoFollower()
 		return
 	}
@@ -143,7 +139,7 @@ func (rf *Raft) runCandidate() {
 		}
 	}
 	if sum > rf.serverNum/2 {
-		fmt.Printf("me:%v term%v become leader\n", rf.me, rf.term)
+		// fmt.Printf("me:%v term%v become leader\n", rf.me, rf.term)
 		rf.state = StateLeader
 		// 变为leader后，启动一个goroutine检查是否进行commit
 		// 这个routine会在rf变为follower后停止
@@ -156,7 +152,7 @@ func (rf *Raft) runCandidate() {
 		}
 		// go rf.commiter()
 	} else {
-		fmt.Printf("me:%v term%v vote failed\n", rf.me, rf.term)
+		// fmt.Printf("me:%v term%v vote failed\n", rf.me, rf.term)
 		rf.TurntoFollower()
 	}
 	rf.persist()
@@ -234,7 +230,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if reply.Vote {
 		rf.TurntoFollower()
 		rf.voteTo[args.Term] = args.Me
-		fmt.Printf("me:%v vote %v, term%v\n", rf.me, args.Me, reply.Term)
+		// fmt.Printf("me:%v vote %v, term%v\n", rf.me, args.Me, reply.Term)
 		rf.persist()
 	}
 }
@@ -310,7 +306,7 @@ func (rf *Raft) startVote(server int, startterm int) {
 	// 检查是不是无效票
 	rf.rwmu.Lock()
 	defer rf.rwmu.Unlock()
-	fmt.Printf("me:%v revi term%v's vote%v from %v,curterm%v\n", rf.me, term, reply.Vote, reply.Me, rf.term)
+	// fmt.Printf("me:%v revi term%v's vote%v from %v,curterm%v\n", rf.me, term, reply.Vote, reply.Me, rf.term)
 	if rf.state != StateCandidate || rf.ifstopvote || term != rf.term {
 		return
 	}
@@ -417,7 +413,7 @@ func (rf *Raft) startHeartBeat(server int, startterm int) {
 		// 这时候leader强制转为follower
 		tmpterm := rf.logs[reply.CommitIndex-rf.snapoffset].Term
 		if reply.CommitTerm != tmpterm {
-			fmt.Printf("me:%v leader wrong commit[%v] term%v from reply%v, become follower\n", rf.me, reply.CommitIndex, tmpterm, reply.CommitTerm)
+			// fmt.Printf("me:%v leader wrong commit[%v] term%v from reply%v, become follower\n", rf.me, reply.CommitIndex, tmpterm, reply.CommitTerm)
 			rf.TurntoFollower()
 			return
 		}
@@ -511,7 +507,7 @@ func (rf *Raft) HeartBeat(args *HeartbeatsArgs, reply *HeartbeatsReply) {
 
 	// 这里遇到了奇怪的数组越界，原因是延迟rpc传来的curindex已经比followercommit的落后了，直接返回0即可
 	if args.CurIndex < rf.commitIndex {
-		fmt.Printf("me:%v old curindex%v < commitindex%v, ignore\n", rf.me, args.CurIndex, rf.commitIndex)
+		// fmt.Printf("me:%v old curindex%v < commitindex%v, ignore\n", rf.me, args.CurIndex, rf.commitIndex)
 		return
 	}
 	// 这里为什么follower是空的也能正常进入matchindex呢？

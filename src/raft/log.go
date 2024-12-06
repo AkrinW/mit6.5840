@@ -81,6 +81,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.persist()
 	fmt.Printf("me:%v append log%v, term%v, index%v\n", rf.me, command, term, index)
 
+	// 在4A speedtest要求commit速度高于heartbeat的频率，别无他法只能在start的时候发送一次heartbeat
+	for i := 0; i < rf.serverNum; i++ {
+		if i == rf.me {
+			continue
+		}
+		go rf.startHeartBeat(i, rf.term)
+	}
 	return index, term, true
 
 	// msg := ApplyMsg{CommandValid: true, CommandIndex: index, Command: command}
@@ -126,7 +133,7 @@ func (rf *Raft) commiter() {
 	// 简单的放在一起即可，每次commit时全程占有锁
 	fmt.Printf("me:%v check if commit\n", rf.me)
 	if rf.state != StateLeader {
-		fmt.Printf("me:%v not leader return\n", rf.me)
+		// fmt.Printf("me:%v not leader return\n", rf.me)
 		return
 	}
 	matchIndex := make([]int, rf.serverNum)
@@ -161,7 +168,7 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int,
 		// 因为snapshot的原因，已经构建不出checklog了，logs[0]对应的command可能不对，不能使用
 		// 如果要check负数，只能发送快照。
 		// 在test4D1里应该不需要考虑，因为follower一直连接状态，leader总是同步完成才commit的
-		fmt.Printf("me:%v log[%v] already snapshot, cant matchlog\n", rf.me, index)
+		// fmt.Printf("me:%v log[%v] already snapshot, cant matchlog\n", rf.me, index)
 		rf.rwmu.Unlock()
 		return
 	}
@@ -229,7 +236,7 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int,
 		return
 	}
 	if rf.term < reply.CurTerm {
-		fmt.Printf("me:%v is old term, change to follower\n", rf.me)
+		// fmt.Printf("me:%v is old term, change to follower\n", rf.me)
 		rf.term = reply.CurTerm
 		rf.TurntoFollower()
 		rf.persist()
@@ -238,7 +245,7 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int,
 	if reply.CommitIndex > rf.commitIndex && reply.CurTerm == rf.term {
 		tmpterm := rf.logs[reply.CommitIndex-rf.snapoffset].Term
 		if reply.CommitTerm != tmpterm {
-			fmt.Printf("me:%v leader wrong commit[%v] term%v from reply%v, become follower\n", rf.me, reply.CommitIndex, tmpterm, reply.CommitTerm)
+			// fmt.Printf("me:%v leader wrong commit[%v] term%v from reply%v, become follower\n", rf.me, reply.CommitIndex, tmpterm, reply.CommitTerm)
 			rf.TurntoFollower()
 			return
 		}
@@ -269,7 +276,7 @@ func (rf *Raft) SyncLog(args *SyncLogEntryArgs, reply *SyncLogEntryReply) {
 	defer rf.rwmu.Unlock()
 	if args.CurTerm < rf.term || args.CommitIndex < rf.commitIndex {
 		// old request , refuse
-		fmt.Printf("me:%v reci old leader check match,ignore\n", rf.me)
+		// fmt.Printf("me:%v reci old leader check match,ignore\n", rf.me)
 		reply.CurTerm = rf.term
 		reply.IfOutedate = true
 		return
@@ -285,6 +292,10 @@ func (rf *Raft) SyncLog(args *SyncLogEntryArgs, reply *SyncLogEntryReply) {
 		fmt.Printf("me:%v sync nothing\n", rf.me)
 		return
 	}
+	if args.Log[0].Index <= rf.snapoffset {
+		// fmt.Printf("me:%v synclog is older than snapshot, ignore\n", rf.me)
+		return
+	}
 	index := 0
 	offset := rf.snapoffset
 	// fmt.Printf("me:%v log before sync%v\n", rf.me, rf.logs)
@@ -292,6 +303,8 @@ func (rf *Raft) SyncLog(args *SyncLogEntryArgs, reply *SyncLogEntryReply) {
 		index = args.Log[i].Index
 		// 修改这里赋值log的逻辑，注意不能用nextindex修改，而要用log的长度修改，
 		// 因为nextindex和log实际长度不对应会导致错误的append
+		// heartbeat频率增加后出现了这里同步已经snapshot的问题。
+		// 传入的时候检查log是不是过时了
 		if index-offset < len(rf.logs) {
 			rf.logs[index-offset] = args.Log[i]
 		} else {
