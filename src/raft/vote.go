@@ -171,7 +171,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.rwmu.Lock()
 	defer rf.rwmu.Unlock()
 	term := rf.term
-	commitindex := rf.commitIndex
+	// commitindex := rf.commitIndex
 	curindex := rf.nextIndex - 1
 	offset := rf.snapoffset
 	// 所有rf.logs[]的操作都减去一个offset
@@ -191,12 +191,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				reply.Vote = true
 			}
 			if args.CurTerm == curterm {
-				if args.CurIndex > curindex {
+				if args.CurIndex >= curindex {
 					reply.Vote = true
 				}
-				if args.CurIndex == curindex && args.CommitIndex >= commitindex {
-					reply.Vote = true
-				}
+				// if args.CurIndex == curindex && args.CommitIndex >= commitindex {
+				// 	reply.Vote = true
+				// }
 			} // 和注释里的原投票逻辑更改了一下顺序。。希望能完成测试
 
 			// if args.CommitIndex > commitindex {
@@ -218,12 +218,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.Vote = true
 		}
 		if args.CurTerm == curterm {
-			if args.CurIndex > curindex {
+			if args.CurIndex >= curindex {
 				reply.Vote = true
 			}
-			if args.CurIndex == curindex && args.CommitIndex >= commitindex {
-				reply.Vote = true
-			}
+			// if args.CurIndex == curindex && args.CommitIndex >= commitindex {
+			// 	reply.Vote = true
+			// }
 		}
 		rf.term = args.Term
 		rf.TurntoFollower()

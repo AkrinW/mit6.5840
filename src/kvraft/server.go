@@ -1,32 +1,19 @@
 package kvraft
 
 import (
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
-	"log"
-	"sync"
-	"sync/atomic"
 )
-
-const Debug = false
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug {
-		log.Printf(format, a...)
-	}
-	return
-}
-
-
-type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
-}
 
 type KVServer struct {
 	mu      sync.Mutex
+	rwmu    sync.RWMutex
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
@@ -35,19 +22,181 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	DataBase    map[string]string
+	HistoryData map[int64]string
+	HistoryTran map[int64]int
+	CommitedOp  []Op
+	// RaftTerm    int
 }
 
-
-func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+func (kv *KVServer) Get(args *KVArgs, reply *KVReply) {
 	// Your code here.
+	fmt.Printf("srv%v reci %v's Get[%v] Trans:%v\n", kv.me, args.ClientID, args.Key, args.TranscationID)
+	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value, OK}
+	kv.submitCommand(&command)
+
+	reply.ServerID = kv.me
+	reply.Err = command.Status
+	if reply.Err != OK {
+		fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
+		return
+	}
+	reply.Value = command.Value
+
+	// kv.HistoryTran[args.ClientID] = args.TranscationID
 }
 
-func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
+func (kv *KVServer) Put(args *KVArgs, reply *KVReply) {
 	// Your code here.
+	fmt.Printf("srv%v reci %v's Put[%v]=%v Trans:%v\n", kv.me, args.ClientID, args.Key, args.Value, args.TranscationID)
+	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value, OK}
+	kv.submitCommand(&command)
+
+	reply.ServerID = kv.me
+	reply.Err = command.Status
+	if reply.Err != OK {
+		fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
+		return
+	}
+	reply.Value = command.Value
+
+	// kv.HistoryTran[args.ClientID] = args.TranscationID
+	// kv.DataBase[args.Key] = args.Value
 }
 
-func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
+func (kv *KVServer) Append(args *KVArgs, reply *KVReply) {
 	// Your code here.
+	fmt.Printf("srv%v reci %v's Append[%v]+%v Trans:%v\n", kv.me, args.ClientID, args.Key, args.Value, args.TranscationID)
+	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value, OK}
+	kv.submitCommand(&command)
+
+	reply.ServerID = kv.me
+	reply.Err = command.Status
+	if reply.Err != OK {
+		fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
+		return
+	}
+	reply.Value = command.Value
+
+	// kv.HistoryTran[args.ClientID] = args.TranscationID
+	// value, exists := kv.HistoryData[args.ClientID]
+	// if !exists {
+	// 	kv.HistoryData[args.ClientID] = kv.DataBase[args.Key]
+	// 	reply.Value = kv.DataBase[args.Key]
+	// 	kv.DataBase[args.Key] += args.Value
+	// } else {
+	// 	reply.Value = value
+	// }
+}
+
+func (kv *KVServer) Report(args *KVArgs, reply *KVReply) {
+	// Your code here.
+	fmt.Printf("srv%v reci %v's Report Trans:%v\n", kv.me, args.ClientID, args.TranscationID)
+	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value, OK}
+	kv.submitCommand(&command)
+
+	reply.ServerID = kv.me
+	reply.Err = command.Status
+	if reply.Err != OK {
+		fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
+		return
+	}
+	reply.Value = command.Value
+
+	// kv.mu.Lock()
+	// defer kv.mu.Unlock()
+	// delete(kv.HistoryData, args.ClientID)
+}
+
+func (kv *KVServer) submitCommand(cmd *Op) {
+	cmdindex, term, isLeader := kv.rf.Start(*cmd)
+	if !isLeader {
+		cmd.Status = ErrWrongLeader
+		return
+	}
+
+	fmt.Printf("srv:%v submit cmd%v, index:%v term%v\n", kv.me, cmd, cmdindex, term)
+	for !kv.killed() {
+		time.Sleep(100 * time.Millisecond)
+		fmt.Printf("every100ms check if%v commit\n", cmdindex)
+		kv.rwmu.RLock()
+		commitOp := Op{}
+		if len(kv.CommitedOp) > cmdindex {
+			commitOp = kv.CommitedOp[cmdindex]
+		} else {
+			kv.rwmu.RUnlock()
+			continue
+		}
+		kv.rwmu.RUnlock()
+
+		if commitOp.ClientID != cmd.ClientID {
+			fmt.Printf("cmd%v index%v not commit\n", cmd, cmdindex)
+			cmd.Status = ErrNotcommit
+			break
+		}
+
+		cmd.Value = commitOp.Value
+		break
+	}
+	// for !kv.killed() && kv.getAppliedLogIdx() < int32(cmdIdx) && kv.getRaftTerm() == int32(term) {
+	// }
+
+	// if cmd.Status == LogNotMatch {
+	// 	DPrintf("[%s]Command %v Not Match, Need Re-Submit To KVServer", kv.getServerDetail(), cmd)
+	// }
+
+	// if != int32(term) {
+	// 	cmd.Status = ErrTermchanged
+	// 	DPrintf("[%s]Command %v Is Expired, SubmitTerm:%d, CurrentTerm:%d, Need Re-Submit To KVServer",
+	// 		kv.getServerDetail(), cmd, term, kv.getRaftTerm())
+	// }
+
+	if kv.killed() {
+		cmd.Status = ErrKilled
+	}
+}
+
+func (kv *KVServer) applier(applyCh chan raft.ApplyMsg) {
+	for m := range applyCh {
+		// err_msg := ""
+		if kv.killed() {
+			return
+		}
+		if !m.CommandValid {
+			fmt.Printf("not command,ignore\n")
+		} else {
+			cmdindex := m.CommandIndex
+			cmd := m.Command.(Op)
+			fmt.Printf("srv:%v reci command[%v]:%v\n", kv.me, cmdindex, cmd)
+			kv.applyCommand(cmdindex, &cmd)
+		}
+	}
+}
+
+func (kv *KVServer) applyCommand(index int, cmd *Op) {
+	kv.rwmu.Lock()
+	defer kv.rwmu.Unlock()
+
+	kv.HistoryTran[cmd.ClientID] = cmd.TranscationID
+	switch cmd.Type {
+	case GET:
+		cmd.Value = kv.DataBase[cmd.Key]
+	case PUT:
+		kv.DataBase[cmd.Key] = cmd.Value
+	case APPEND:
+		_, exists := kv.HistoryData[cmd.ClientID]
+		if !exists {
+			kv.HistoryData[cmd.ClientID] = kv.DataBase[cmd.Key]
+			kv.DataBase[cmd.Key] += cmd.Value
+		}
+	case REPORT:
+		delete(kv.HistoryData, cmd.ClientID)
+	}
+
+	if len(kv.CommitedOp) != index {
+		fmt.Printf("CommitedIndex wrong expect%v actal %v\n", len(kv.CommitedOp), index)
+	}
+	kv.CommitedOp = append(kv.CommitedOp, *cmd)
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -94,8 +243,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.DataBase = make(map[string]string)
+	kv.HistoryData = make(map[int64]string)
+	kv.HistoryTran = make(map[int64]int)
+	kv.CommitedOp = make([]Op, 1)
 
-	// You may need initialization code here.
-
+	go kv.applier(kv.applyCh)
 	return kv
 }
