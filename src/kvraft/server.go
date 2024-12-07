@@ -34,31 +34,30 @@ type KVServer struct {
 
 func (kv *KVServer) Get(args *KVArgs, reply *KVReply) {
 	// Your code here.
-	fmt.Printf("srv%v reci %v's Get[%v] Trans:%v\n", kv.me, args.ClientID, args.Key, args.TranscationID)
+	// fmt.Printf("srv%v reci %v's Get[%v] Trans:%v\n", kv.me, args.ClientID, args.Key, args.TranscationID)
 	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value, OK}
 	kv.submitCommand(&command)
 
 	reply.ServerID = kv.me
 	reply.Err = command.Status
 	if reply.Err != OK && reply.Err != ErrCompleted {
-		fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
+		// fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
 		return
 	}
 	reply.Value = command.Value
-
 	// kv.HistoryTran[args.ClientID] = args.TranscationID
 }
 
 func (kv *KVServer) Put(args *KVArgs, reply *KVReply) {
 	// Your code here.
-	fmt.Printf("srv%v reci %v's Put[%v]=%v Trans:%v\n", kv.me, args.ClientID, args.Key, args.Value, args.TranscationID)
+	// fmt.Printf("srv%v reci %v's Put[%v]=%v Trans:%v\n", kv.me, args.ClientID, args.Key, args.Value, args.TranscationID)
 	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value, OK}
 	kv.submitCommand(&command)
 
 	reply.ServerID = kv.me
 	reply.Err = command.Status
 	if reply.Err != OK && reply.Err != ErrCompleted {
-		fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
+		// fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
 		return
 	}
 	// reply.Value = command.Value
@@ -69,14 +68,14 @@ func (kv *KVServer) Put(args *KVArgs, reply *KVReply) {
 
 func (kv *KVServer) Append(args *KVArgs, reply *KVReply) {
 	// Your code here.
-	fmt.Printf("srv%v reci %v's Append[%v]+%v Trans:%v\n", kv.me, args.ClientID, args.Key, args.Value, args.TranscationID)
+	// fmt.Printf("srv%v reci %v's Append[%v]+%v Trans:%v\n", kv.me, args.ClientID, args.Key, args.Value, args.TranscationID)
 	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value, OK}
 	kv.submitCommand(&command)
 
 	reply.ServerID = kv.me
 	reply.Err = command.Status
 	if reply.Err != OK && reply.Err != ErrCompleted {
-		fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
+		// fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
 		return
 	}
 
@@ -122,9 +121,13 @@ func (kv *KVServer) submitCommand(cmd *Op) {
 	// 导致原command还在不断检查的情况。
 	// 修改方式是接受log时，检查log的term，如果超过了现有的term，
 	// 说明过时不会commit了，让client重发
+	// 7.偶发新的getbug,get到的值为空，原因是错误判定已完成。重新检查submit的逻辑
+	// 原因出在apply上，index上commit的是已commit的，所以直接返回，没有储存commitcl却更新了curindex
+	// submit循环检查发现curindex大于当前值,然后查找不到commitop便以为是已提交的commit
+	// 简单修改,需要
 	if len(kv.HistoryTran[cmd.ClientID]) >= cmd.TranscationID {
 		// 已执行完成的cmd，直接返回已有结果
-		fmt.Printf("completed cmd%v, return\n", cmd)
+		// fmt.Printf("completed cmd%v, return\n", cmd)
 		cmd.Status = ErrCompleted
 		if cmd.Type == GET {
 			index := kv.HistoryTran[cmd.ClientID][cmd.TranscationID]
@@ -141,8 +144,7 @@ func (kv *KVServer) submitCommand(cmd *Op) {
 		return
 	}
 	fmt.Printf("srv:%v submit cmd%v, index:%v term%v\n", kv.me, cmd, cmdindex, term)
-	var commitclient int64 = 0
-	var exist bool
+
 	for !kv.killed() {
 		time.Sleep(10 * time.Millisecond)
 		// fmt.Printf("every10ms check if%v commit\n", cmdindex)
@@ -154,35 +156,26 @@ func (kv *KVServer) submitCommand(cmd *Op) {
 			kv.rwmu.RUnlock()
 			break
 		}
-		fmt.Printf("kv:%v curcomit%v cmdindex%v\n", kv.me, kv.CurCommitIndex, cmdindex)
+		// fmt.Printf("kv:%v curcomit%v cmdindex%v\n", kv.me, kv.CurCommitIndex, cmdindex)
 		if kv.CurCommitIndex >= cmdindex {
-			commitclient, exist = kv.CommitedOp[cmdindex]
-			if !exist {
-				// 提交到了cmdindex，却没有存index的clientid，说明这个cmd已经提交过了
-				// 从transcid里找之前commit的
-				cmd.Status = ErrCompleted
-				if cmd.Type == GET {
+			if cmd.ClientID != kv.CommitedOp[cmdindex] {
+				fmt.Printf("cmd%v index%v not commit\n", cmd, cmdindex)
+				cmd.Status = ErrNotcommit
+			} else {
+				if cmdindex != kv.HistoryTran[cmd.ClientID][cmd.TranscationID] {
+					cmd.Status = ErrCompleted
 					cmdindex = kv.HistoryTran[cmd.ClientID][cmd.TranscationID]
+				}
+				if cmd.Type == GET {
 					cmd.Value = kv.CommitedforGet[cmdindex]
 				}
-				kv.rwmu.RUnlock()
-				break
 			}
-			if cmd.Type == GET {
-				cmd.Value = kv.CommitedforGet[cmdindex]
-			}
+			kv.rwmu.RUnlock()
+			break
 		} else {
 			kv.rwmu.RUnlock()
 			continue
 		}
-		kv.rwmu.RUnlock()
-		if commitclient != cmd.ClientID {
-			fmt.Printf("cmd%v index%v not commit\n", cmd, cmdindex)
-			cmd.Status = ErrNotcommit
-			break
-		}
-
-		break
 	}
 	// for !kv.killed() && kv.getAppliedLogIdx() < int32(cmdIdx) && kv.getRaftTerm() == int32(term) {
 	// }
@@ -229,6 +222,7 @@ func (kv *KVServer) applyCommand(index int, cmd *Op) {
 		kv.HistoryTran[cmd.ClientID] = make(map[int]int)
 	}
 	kv.CurCommitIndex = index
+	kv.CommitedOp[index] = cmd.ClientID
 	// client对不同server都进行start的情况，在apply时检查是否已提交了。
 	if _, exist := kv.HistoryTran[cmd.ClientID][cmd.TranscationID]; exist {
 		return
@@ -250,7 +244,6 @@ func (kv *KVServer) applyCommand(index int, cmd *Op) {
 		// case REPORT:
 		// delete(kv.HistoryData, cmd.ClientID)
 	}
-	kv.CommitedOp[index] = cmd.ClientID
 	// if len(kv.CommitedOp) != index {
 	// 	fmt.Printf("CommitedIndex wrong expect%v actal %v\n", len(kv.CommitedOp), index)
 	// }

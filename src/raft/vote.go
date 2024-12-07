@@ -1,9 +1,5 @@
 package raft
 
-import (
-	"fmt"
-)
-
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
@@ -64,7 +60,7 @@ func (rf *Raft) ticker() {
 
 		rf.rwmu.RLock()
 		state := rf.state
-		fmt.Printf("me:%v term:%v state:%v commit:%v next:%v loglen:%v match:%v\n", rf.me, rf.term, rf.state, rf.commitIndex, rf.nextIndex, len(rf.logs), rf.matchIndex)
+		// fmt.Printf("me:%v term:%v state:%v commit:%v next:%v loglen:%v match:%v\n", rf.me, rf.term, rf.state, rf.commitIndex, rf.nextIndex, len(rf.logs), rf.matchIndex)
 		rf.rwmu.RUnlock()
 
 		switch state {

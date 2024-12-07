@@ -131,7 +131,7 @@ func (rf *Raft) commiter() {
 	// 这里问题出现在哪里呢？因为这里出现释放锁后又重复获取的情况，在之前判定通过后
 	// 锁被别的线程取走占用了很长时间，而这段时间rf已经不再是leader了，却没有进行判定
 	// 简单的放在一起即可，每次commit时全程占有锁
-	fmt.Printf("me:%v check if commit\n", rf.me)
+	// fmt.Printf("me:%v check if commit\n", rf.me)
 	if rf.state != StateLeader {
 		// fmt.Printf("me:%v not leader return\n", rf.me)
 		return
@@ -140,14 +140,14 @@ func (rf *Raft) commiter() {
 	copy(matchIndex, rf.matchIndex)
 	sort.Ints(matchIndex)
 	offset := rf.snapoffset
-	fmt.Printf("matchindex:%v\n", rf.matchIndex)
+	// fmt.Printf("matchindex:%v\n", rf.matchIndex)
 	if rf.commitIndex >= matchIndex[rf.serverNum/2] {
-		fmt.Printf("no new commits\n")
+		// fmt.Printf("no new commits\n")
 		return
 	}
 	index := matchIndex[rf.serverNum/2]
 	if rf.logs[index-offset].Term < rf.term {
-		fmt.Printf("new match log%v but old, term%v not commit\n", rf.logs[index-offset], rf.term)
+		// fmt.Printf("new match log%v but old, term%v not commit\n", rf.logs[index-offset], rf.term)
 		return
 	}
 	rf.committochan(matchIndex[rf.serverNum/2], "commiter")
@@ -199,7 +199,7 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int,
 	reply := SyncLogEntryReply{}
 	rf.rwmu.Unlock()
 	// fmt.Printf("slog:%v,comit%v,args%v\n", slogentry, commitindex, args)
-	fmt.Printf("me:%v sync server:%v's log%v to %v\n", rf.me, server, i, index-1)
+	// fmt.Printf("me:%v sync server:%v's log%v to %v\n", rf.me, server, i, index-1)
 	// fmt.Printf("logs:%v\n", args.Log)
 	ok := false
 	rpccount := 0
@@ -258,7 +258,7 @@ func (rf *Raft) MatchLog(server int, slogentry []SimpleLogEntry, startindex int,
 	}
 	if reply.Flag && rf.matchIndex[server] < index-1 {
 		rf.matchIndex[server] = index - 1
-		fmt.Printf("me:%v in matchlog, change matchindex[%v]=%v\n", rf.me, server, index-1)
+		// fmt.Printf("me:%v in matchlog, change matchindex[%v]=%v\n", rf.me, server, index-1)
 		rf.commiter()
 	}
 }
@@ -289,7 +289,7 @@ func (rf *Raft) SyncLog(args *SyncLogEntryArgs, reply *SyncLogEntryReply) {
 	}
 	rf.TurntoFollower()
 	if len(args.Log) == 0 {
-		fmt.Printf("me:%v sync nothing\n", rf.me)
+		// fmt.Printf("me:%v sync nothing\n", rf.me)
 		return
 	}
 	if args.Log[0].Index <= rf.snapoffset {
@@ -315,7 +315,7 @@ func (rf *Raft) SyncLog(args *SyncLogEntryArgs, reply *SyncLogEntryReply) {
 	rf.nextIndex = index + 1
 	// fmt.Printf("me:%v log after sync%v\n", rf.me, rf.logs)
 	reply.Flag = true
-	fmt.Printf("me:%v sync from%v log%v to %v\n", rf.me, args.Me, args.Log[0].Index, index)
+	// fmt.Printf("me:%v sync from%v log%v to %v\n", rf.me, args.Me, args.Log[0].Index, index)
 
 	// 似乎找到了新的优化点，在synclog时，可以把follower的节点commit到和leader一致
 	// 本来的写法follower只在下次heartbeat时才commit，在figure83C会出现古怪的错误

@@ -53,7 +53,7 @@ func (ck *Clerk) Get(key string) string {
 	reply := KVReply{}
 	// args.Print()
 	ck.CallServer(&args, &reply)
-	fmt.Printf("cl%v %v complete\n", ck.clientID, GET)
+	// fmt.Printf("cl%v %v complete\n", ck.clientID, GET)
 	return reply.Value
 }
 
@@ -72,7 +72,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	reply := KVReply{}
 	// args.Print()
 	ck.CallServer(&args, &reply)
-	fmt.Printf("cl%v %v complete\n", ck.clientID, op)
+	// fmt.Printf("cl%v %v complete\n", ck.clientID, op)
 	// if op == APPEND {
 	// 	ck.Report()
 	// }
@@ -99,13 +99,13 @@ func (ck *Clerk) CallServer(args *KVArgs, reply *KVReply) {
 	curserver := leader
 	op := args.Type
 	for {
-		fmt.Printf("cl%v %v to srv%v\n", ck.clientID, op, curserver)
+		// fmt.Printf("cl%v %v to srv%v\n", ck.clientID, op, curserver)
 		ok := ck.servers[curserver].Call("KVServer."+op, args, reply)
 		if !ok || reply.Err == ErrKilled || reply.Err == ErrWrongLeader {
-			fmt.Printf("cl%v %v to srv%v failed:%v\n", ck.clientID, op, curserver, reply.Err)
+			// fmt.Printf("cl%v %v to srv%v failed:%v\n", ck.clientID, op, curserver, reply.Err)
 			curserver = (curserver + 1) % ck.serverNum
 			if curserver == leader {
-				fmt.Printf("cl%v %v but no leader, wait 0.3s\n", ck.clientID, op)
+				// fmt.Printf("cl%v %v but no leader, wait 0.3s\n", ck.clientID, op)
 				time.Sleep(300 * time.Millisecond)
 			}
 			continue
@@ -115,16 +115,16 @@ func (ck *Clerk) CallServer(args *KVArgs, reply *KVReply) {
 			break
 		}
 		if reply.Err == ErrCompleted {
-			fmt.Printf("cl%v %v to src%v already\n", ck.clientID, op, curserver)
+			// fmt.Printf("cl%v %v to src%v already\n", ck.clientID, op, curserver)
 			break
 		}
 		if reply.Err == ErrNoKey || reply.Err == ErrTermchanged {
-			fmt.Printf("cl%v %v to srv%v failed:%v\n", ck.clientID, op, curserver, reply.Err)
+			// fmt.Printf("cl%v %v to srv%v failed:%v\n", ck.clientID, op, curserver, reply.Err)
 			continue
 		}
 	}
 	if leader != curserver {
 		ck.leaderID = curserver
-		fmt.Printf("cl%v update leaderID to %v\n", ck.clientID, ck.leaderID)
+		// fmt.Printf("cl%v update leaderID to %v\n", ck.clientID, ck.leaderID)
 	}
 }
