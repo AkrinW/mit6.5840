@@ -31,7 +31,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	// You'll have to add code here.
 	ck.serverNum = len(servers)
-	ck.clientID = nrand() % 100
+	ck.clientID = nrand()
 	ck.transcationID = 0
 	ck.leaderID = 0
 	return ck
@@ -112,6 +112,10 @@ func (ck *Clerk) CallServer(args *KVArgs, reply *KVReply) {
 		}
 		if reply.Err == OK {
 			fmt.Printf("cl%v %v to srv%v succeed\n", ck.clientID, op, curserver)
+			break
+		}
+		if reply.Err == ErrCompleted {
+			fmt.Printf("cl%v %v to src%v already\n", ck.clientID, op, curserver)
 			break
 		}
 		if reply.Err == ErrNoKey || reply.Err == ErrTermchanged {
