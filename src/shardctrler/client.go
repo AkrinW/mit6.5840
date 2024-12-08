@@ -6,6 +6,7 @@ package shardctrler
 
 import (
 	"crypto/rand"
+	"fmt"
 	"math/big"
 	"time"
 
@@ -44,66 +45,30 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Query(num int) Config {
 	ck.transcationID++
 	args := QueryArgs{ck.clientID, ck.transcationID, QUERY, num}
-
 	reply := QueryReply{}
-	// Your code here.
 	ck.CallServer(&args, &reply)
 	return reply.Config
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
-	// Your code here.
-	args.Servers = servers
-
-	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply JoinReply
-			ok := srv.Call("ShardCtrler.Join", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	ck.transcationID++
+	args := JoinArgs{ck.clientID, ck.transcationID, JOIN, servers}
+	reply := JoinReply{}
+	ck.CallServer(&args, &reply)
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
-	// Your code here.
-	args.GIDs = gids
-
-	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply LeaveReply
-			ok := srv.Call("ShardCtrler.Leave", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	ck.transcationID++
+	args := LeaveArgs{ck.clientID, ck.transcationID, LEAVE, gids}
+	reply := LeaveReply{}
+	ck.CallServer(&args, &reply)
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
-	// Your code here.
-	args.Shard = shard
-	args.GID = gid
-
-	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply MoveReply
-			ok := srv.Call("ShardCtrler.Move", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	ck.transcationID++
+	args := MoveArgs{ck.clientID, ck.transcationID, MOVE, shard, gid}
+	reply := MoveReply{}
+	ck.CallServer(&args, &reply)
 }
 
 func (ck *Clerk) CallServer(args Args, reply Reply) {
@@ -111,8 +76,8 @@ func (ck *Clerk) CallServer(args Args, reply Reply) {
 	curserver := leader
 	op := args.getType()
 	for {
-		// fmt.Printf("cl%v %v to srv%v\n", ck.clientID, op, curserver)
-		ok := ck.servers[curserver].Call("KVServer."+op, args, reply)
+		fmt.Printf("cl%v %v to srv%v\n", ck.clientID, op, curserver)
+		ok := ck.servers[curserver].Call("ShardCtrler."+op, args, reply)
 		if !ok || reply.getErr() == ErrKilled || reply.getErr() == ErrWrongLeader {
 			// fmt.Printf("cl%v %v to srv%v failed:%v\n", ck.clientID, op, curserver, reply.Err)
 			curserver = (curserver + 1) % ck.serverNum

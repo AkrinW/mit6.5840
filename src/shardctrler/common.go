@@ -57,9 +57,8 @@ type JoinArgs struct {
 }
 
 type JoinReply struct {
-	ServerID    int
-	WrongLeader bool
-	Err         Err
+	ServerID int
+	Err      Err
 }
 
 type LeaveArgs struct {
@@ -70,9 +69,8 @@ type LeaveArgs struct {
 }
 
 type LeaveReply struct {
-	ServerID    int
-	WrongLeader bool
-	Err         Err
+	ServerID int
+	Err      Err
 }
 
 type MoveArgs struct {
@@ -84,9 +82,8 @@ type MoveArgs struct {
 }
 
 type MoveReply struct {
-	ServerID    int
-	WrongLeader bool
-	Err         Err
+	ServerID int
+	Err      Err
 }
 
 type QueryArgs struct {
@@ -97,10 +94,9 @@ type QueryArgs struct {
 }
 
 type QueryReply struct {
-	ServerID    int
-	WrongLeader bool
-	Err         Err
-	Config      Config
+	ServerID int
+	Err      Err
+	Config   Config
 }
 
 const Debug = false
