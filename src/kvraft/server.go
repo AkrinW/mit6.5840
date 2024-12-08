@@ -27,8 +27,8 @@ type KVServer struct {
 	HistoryTran    map[int64]map[int]int
 	CurCommitIndex int
 	CurTerm        int
-	CommitedOp     map[int]int64
-	CommitedforGet map[int]string
+	// CommitedOp     map[int]int64
+	// CommitedforGet map[int]string
 	// RaftTerm    int
 }
 
@@ -124,15 +124,21 @@ func (kv *KVServer) submitCommand(cmd *Op) {
 	// 7.偶发新的getbug,get到的值为空，原因是错误判定已完成。重新检查submit的逻辑
 	// 原因出在apply上，index上commit的是已commit的，所以直接返回，没有储存commitcl却更新了curindex
 	// submit循环检查发现curindex大于当前值,然后查找不到commitop便以为是已提交的commit
-	// 简单修改,需要
+	// 简单修改,需要存所有的cmtclid。
+	// 8. 思考线性化的意义。在实现raft后应该是天然线性化的，因此没有必要为get存储过去的数据
+	// 9. 新的偶发bug,只存cmtclid不够,考虑这种情况:cl向srv1提交在index900处并commit成功,
+	// 之后向一个被隔离的srv提交另一个指令,index刚好也是900,此时clid一致但transid不同。
+	// srv重连后向leader同步,由于是相同的clid,让srv以为这条指令已执行,结果是数据丢失
+	// 修改方法:都记录clid和trid
 	if len(kv.HistoryTran[cmd.ClientID]) >= cmd.TranscationID {
 		// 已执行完成的cmd，直接返回已有结果
 		// fmt.Printf("completed cmd%v, return\n", cmd)
 		cmd.Status = ErrCompleted
 		if cmd.Type == GET {
-			index := kv.HistoryTran[cmd.ClientID][cmd.TranscationID]
+			// index := kv.HistoryTran[cmd.ClientID][cmd.TranscationID]
 			// cmd.Value = kv.CommitedOp[index].Value
-			cmd.Value = kv.CommitedforGet[index]
+			// cmd.Value = kv.CommitedforGet[index]
+			cmd.Value = kv.DataBase[cmd.Key]
 		}
 		kv.rwmu.RUnlock()
 		return
@@ -158,18 +164,29 @@ func (kv *KVServer) submitCommand(cmd *Op) {
 		}
 		// fmt.Printf("kv:%v curcomit%v cmdindex%v\n", kv.me, kv.CurCommitIndex, cmdindex)
 		if kv.CurCommitIndex >= cmdindex {
-			if cmd.ClientID != kv.CommitedOp[cmdindex] {
-				fmt.Printf("cmd%v index%v not commit\n", cmd, cmdindex)
-				cmd.Status = ErrNotcommit
-			} else {
-				if cmdindex != kv.HistoryTran[cmd.ClientID][cmd.TranscationID] {
+			if ind, exist := kv.HistoryTran[cmd.ClientID][cmd.TranscationID]; exist {
+				if ind != cmdindex {
 					cmd.Status = ErrCompleted
-					cmdindex = kv.HistoryTran[cmd.ClientID][cmd.TranscationID]
 				}
 				if cmd.Type == GET {
-					cmd.Value = kv.CommitedforGet[cmdindex]
+					cmd.Value = kv.DataBase[cmd.Key]
 				}
+			} else {
+				fmt.Printf("cmd%v index%v not commit\n", cmd, cmdindex)
+				cmd.Status = ErrNotcommit
 			}
+			// if cmd.ClientID != kv.CommitedOp[cmdindex] {
+			// 	fmt.Printf("cmd%v index%v not commit\n", cmd, cmdindex)
+			// 	cmd.Status = ErrNotcommit
+			// } else {
+			// 	if cmdindex != kv.HistoryTran[cmd.ClientID][cmd.TranscationID] {
+			// 		cmd.Status = ErrCompleted
+			// 		cmdindex = kv.HistoryTran[cmd.ClientID][cmd.TranscationID]
+			// 	}
+			// 	if cmd.Type == GET {
+			// 		cmd.Value = kv.CommitedforGet[cmdindex]
+			// 	}
+			// }
 			kv.rwmu.RUnlock()
 			break
 		} else {
@@ -208,7 +225,6 @@ func (kv *KVServer) applier(applyCh chan raft.ApplyMsg) {
 			cmd := m.Command.(Op)
 			// fmt.Printf("srv:%v reci command[%v]:%v\n", kv.me, cmdindex, cmd)
 			kv.applyCommand(cmdindex, &cmd)
-
 		}
 	}
 }
@@ -221,17 +237,20 @@ func (kv *KVServer) applyCommand(index int, cmd *Op) {
 		// 如果没有初始化嵌套的 map，则初始化
 		kv.HistoryTran[cmd.ClientID] = make(map[int]int)
 	}
+	// kv.CurTerm, _ = kv.rf.GetState()
 	kv.CurCommitIndex = index
-	kv.CommitedOp[index] = cmd.ClientID
+	// kv.CommitedOp[index] = cmd.ClientID
 	// client对不同server都进行start的情况，在apply时检查是否已提交了。
 	if _, exist := kv.HistoryTran[cmd.ClientID][cmd.TranscationID]; exist {
+		kv.HistoryTran[cmd.ClientID][cmd.TranscationID] = index
 		return
 	}
 
 	kv.HistoryTran[cmd.ClientID][cmd.TranscationID] = index
 	switch cmd.Type {
 	case GET:
-		kv.CommitedforGet[index] = kv.DataBase[cmd.Key]
+		// kv.CommitedforGet[index] = kv.DataBase[cmd.Key]
+
 	case PUT:
 		kv.DataBase[cmd.Key] = cmd.Value
 	case APPEND:
@@ -297,8 +316,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// kv.HistoryData = make(map[int64]string)
 	kv.HistoryTran = make(map[int64]map[int]int)
 	kv.CurCommitIndex = 0
-	kv.CommitedOp = make(map[int]int64)
-	kv.CommitedforGet = make(map[int]string)
+	// kv.CommitedOp = make(map[int]int64)
+	// kv.CommitedforGet = make(map[int]string)
 	kv.CurTerm = 0
 	go kv.applier(kv.applyCh)
 	go kv.termgetter()
