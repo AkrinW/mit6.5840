@@ -1,9 +1,5 @@
 package raft
 
-import (
-	"fmt"
-)
-
 type Snapshot struct {
 	LastIndex int
 	LastTerm  int
@@ -56,7 +52,7 @@ func (rf *Raft) CallSnapshot(index int, snapshot []byte) {
 
 	// 因为要等待获取锁，所以可能会是乱序的snapshot，需要检查，保证snapshot更新
 	if index <= rf.snapshot.LastIndex {
-		fmt.Printf("old snapshot index%v, ignore\n", index)
+		DPrintf("old snapshot index%v, ignore\n", index)
 		return
 	}
 	// 把snapshot拷贝到rf.snapshot里
@@ -75,7 +71,7 @@ func (rf *Raft) CallSnapshot(index int, snapshot []byte) {
 	// 有offset后，需要对原有逻辑都进行调整，需要注意锁释放获取前后，snapshot变化的情况
 	rf.persist()
 	rf.persister.OnlySaveSnapshot(rf.snapshot.Data)
-	fmt.Printf("me:%v snapshot to index%v\n", rf.me, index)
+	DPrintf("me:%v snapshot to index%v\n", rf.me, index)
 }
 
 func (rf *Raft) readSnapshot(data []byte) {
@@ -108,7 +104,7 @@ func (rf *Raft) InstallSnapshot(server int, startterm int) {
 	reply := InstallSnapshotReply{}
 	rf.rwmu.Unlock()
 
-	fmt.Printf("me:%v in term%v send snapshot{%v %v} to %v\n", rf.me, term, snap.LastIndex, snap.LastTerm, server)
+	DPrintf("me:%v in term%v send snapshot{%v %v} to %v\n", rf.me, term, snap.LastIndex, snap.LastTerm, server)
 	ok := false
 	rpccount := 0
 	for !ok {
@@ -141,7 +137,7 @@ func (rf *Raft) InstallSnapshot(server int, startterm int) {
 		return
 	}
 	if rf.term < reply.CurTerm {
-		fmt.Printf("me:%v is old term, change to follower\n", rf.me)
+		DPrintf("me:%v is old term, change to follower\n", rf.me)
 		rf.term = reply.CurTerm
 		rf.TurntoFollower()
 		rf.persist()
@@ -149,7 +145,7 @@ func (rf *Raft) InstallSnapshot(server int, startterm int) {
 	}
 	if reply.Flag && rf.matchIndex[server] < snap.LastIndex {
 		rf.matchIndex[server] = snap.LastIndex
-		fmt.Printf("me:%v in InstallSnapshot, change matchindex[%v]=%v\n", rf.me, server, snap.LastIndex)
+		DPrintf("me:%v in InstallSnapshot, change matchindex[%v]=%v\n", rf.me, server, snap.LastIndex)
 		// 这里不应该进行commit确认，因为靠install snapshot, matchindex最多只能到rf.commitindex的位置，无法进一步commit
 		// rf.commiter()
 	}
@@ -168,7 +164,7 @@ func (rf *Raft) FollowerInstallSnapshot(args *InstallSnapshotArgs, reply *Instal
 	defer rf.rwmu.Unlock()
 	if args.CurTerm < rf.term {
 		// old request , refuse
-		fmt.Printf("me:%v reci old leader install snapshot, ignore\n", rf.me)
+		DPrintf("me:%v reci old leader install snapshot, ignore\n", rf.me)
 		reply.CurTerm = rf.term
 		reply.IfOutedate = true
 	} else {
@@ -179,7 +175,7 @@ func (rf *Raft) FollowerInstallSnapshot(args *InstallSnapshotArgs, reply *Instal
 		rf.TurntoFollower()
 	}
 	if args.InstallSnap.LastIndex <= rf.snapshot.LastIndex {
-		fmt.Printf("me:%v reci old snapshot, do not install\n", rf.me)
+		DPrintf("me:%v reci old snapshot, do not install\n", rf.me)
 		return
 	}
 	// 传来的snapshot比已有的更新，就进行替换和log压缩
@@ -197,10 +193,10 @@ func (rf *Raft) FollowerInstallSnapshot(args *InstallSnapshotArgs, reply *Instal
 
 	reply.Flag = true
 	if snap.LastIndex <= rf.commitIndex {
-		fmt.Printf("me:%v snapshot is older than commmit index\n", rf.me)
+		DPrintf("me:%v snapshot is older than commmit index\n", rf.me)
 	} else {
-		fmt.Printf("me:%v newer snapshot%v, commit it\n", rf.me, snap.LastIndex)
-		fmt.Printf("me:%v commit log[%v]-log[%v] func:FollowerInstallSnapshot\n", rf.me, rf.commitIndex, snap.LastIndex)
+		DPrintf("me:%v newer snapshot%v, commit it\n", rf.me, snap.LastIndex)
+		DPrintf("me:%v commit log[%v]-log[%v] func:FollowerInstallSnapshot\n", rf.me, rf.commitIndex, snap.LastIndex)
 		msg := ApplyMsg{SnapshotValid: true, Snapshot: snap.Data, SnapshotIndex: snap.LastIndex, SnapshotTerm: snap.LastTerm}
 		rf.applyCh <- msg
 		rf.commitIndex = snap.LastIndex

@@ -1,12 +1,12 @@
 package raft
 
-import "log"
+import "fmt"
 
 // Debugging
 const Debug = false
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug {
-		log.Printf(format, a...)
+		fmt.Printf(format, a...)
 	}
 }

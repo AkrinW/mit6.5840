@@ -681,6 +681,7 @@ func TestSnapshotSize4B(t *testing.T) {
 	}
 
 	// check that the snapshots are not unreasonably large
+	DPrintf("sz:%v ssz:%v\n", sz, cfg.SnapshotSize())
 	ssz := cfg.SnapshotSize()
 	if ssz > maxsnapshotstate {
 		t.Fatalf("snapshot too large (%v > %v)", ssz, maxsnapshotstate)

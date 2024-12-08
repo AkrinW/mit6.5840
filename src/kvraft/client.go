@@ -2,7 +2,6 @@ package kvraft
 
 import (
 	"crypto/rand"
-	"fmt"
 	"math/big"
 	"time"
 
@@ -111,7 +110,7 @@ func (ck *Clerk) CallServer(args *KVArgs, reply *KVReply) {
 			continue
 		}
 		if reply.Err == OK {
-			fmt.Printf("cl%v %v to srv%v succeed\n", ck.clientID, op, curserver)
+			DPrintf("cl%v %v to srv%v succeed\n", ck.clientID, op, curserver)
 			break
 		}
 		if reply.Err == ErrCompleted {

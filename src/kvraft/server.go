@@ -1,7 +1,7 @@
 package kvraft
 
 import (
-	"fmt"
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,7 +24,9 @@ type KVServer struct {
 	// Your definitions here.
 	DataBase map[string]string
 	// HistoryData map[int64]string
-	HistoryTran    map[int64]map[int]int
+	// 为了压缩snapshot大小,只存储最高的trans值
+	// HistoryTran    map[int64]map[int]int
+	HistoryTran    map[int64]int
 	CurCommitIndex int
 	CurTerm        int
 	// CommitedOp     map[int]int64
@@ -34,14 +36,14 @@ type KVServer struct {
 
 func (kv *KVServer) Get(args *KVArgs, reply *KVReply) {
 	// Your code here.
-	// fmt.Printf("srv%v reci %v's Get[%v] Trans:%v\n", kv.me, args.ClientID, args.Key, args.TranscationID)
+	// DPrintf("srv%v reci %v's Get[%v] Trans:%v\n", kv.me, args.ClientID, args.Key, args.TranscationID)
 	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value, OK}
 	kv.submitCommand(&command)
 
 	reply.ServerID = kv.me
 	reply.Err = command.Status
 	if reply.Err != OK && reply.Err != ErrCompleted {
-		// fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
+		// DPrintf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
 		return
 	}
 	reply.Value = command.Value
@@ -50,14 +52,14 @@ func (kv *KVServer) Get(args *KVArgs, reply *KVReply) {
 
 func (kv *KVServer) Put(args *KVArgs, reply *KVReply) {
 	// Your code here.
-	// fmt.Printf("srv%v reci %v's Put[%v]=%v Trans:%v\n", kv.me, args.ClientID, args.Key, args.Value, args.TranscationID)
+	// DPrintf("srv%v reci %v's Put[%v]=%v Trans:%v\n", kv.me, args.ClientID, args.Key, args.Value, args.TranscationID)
 	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value, OK}
 	kv.submitCommand(&command)
 
 	reply.ServerID = kv.me
 	reply.Err = command.Status
 	if reply.Err != OK && reply.Err != ErrCompleted {
-		// fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
+		// DPrintf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
 		return
 	}
 	// reply.Value = command.Value
@@ -68,14 +70,14 @@ func (kv *KVServer) Put(args *KVArgs, reply *KVReply) {
 
 func (kv *KVServer) Append(args *KVArgs, reply *KVReply) {
 	// Your code here.
-	// fmt.Printf("srv%v reci %v's Append[%v]+%v Trans:%v\n", kv.me, args.ClientID, args.Key, args.Value, args.TranscationID)
+	// DPrintf("srv%v reci %v's Append[%v]+%v Trans:%v\n", kv.me, args.ClientID, args.Key, args.Value, args.TranscationID)
 	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value, OK}
 	kv.submitCommand(&command)
 
 	reply.ServerID = kv.me
 	reply.Err = command.Status
 	if reply.Err != OK && reply.Err != ErrCompleted {
-		// fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
+		// DPrintf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
 		return
 	}
 
@@ -92,14 +94,14 @@ func (kv *KVServer) Append(args *KVArgs, reply *KVReply) {
 
 // func (kv *KVServer) Report(args *KVArgs, reply *KVReply) {
 // 	// Your code here.
-// 	fmt.Printf("srv%v reci %v's Report Trans:%v\n", kv.me, args.ClientID, args.TranscationID)
+// 	DPrintf("srv%v reci %v's Report Trans:%v\n", kv.me, args.ClientID, args.TranscationID)
 // 	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value, OK}
 // 	kv.submitCommand(&command)
 
 // 	reply.ServerID = kv.me
 // 	reply.Err = command.Status
 // 	if reply.Err != OK {
-// 		fmt.Printf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
+// 		DPrintf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
 // 		return
 // 	}
 // 	reply.Value = command.Value
@@ -130,9 +132,9 @@ func (kv *KVServer) submitCommand(cmd *Op) {
 	// 之后向一个被隔离的srv提交另一个指令,index刚好也是900,此时clid一致但transid不同。
 	// srv重连后向leader同步,由于是相同的clid,让srv以为这条指令已执行,结果是数据丢失
 	// 修改方法:都记录clid和trid
-	if len(kv.HistoryTran[cmd.ClientID]) >= cmd.TranscationID {
+	if kv.HistoryTran[cmd.ClientID] >= cmd.TranscationID {
 		// 已执行完成的cmd，直接返回已有结果
-		// fmt.Printf("completed cmd%v, return\n", cmd)
+		// DPrintf("completed cmd%v, return\n", cmd)
 		cmd.Status = ErrCompleted
 		if cmd.Type == GET {
 			// index := kv.HistoryTran[cmd.ClientID][cmd.TranscationID]
@@ -149,34 +151,34 @@ func (kv *KVServer) submitCommand(cmd *Op) {
 		cmd.Status = ErrWrongLeader
 		return
 	}
-	fmt.Printf("srv:%v submit cmd%v, index:%v term%v\n", kv.me, cmd, cmdindex, term)
+	DPrintf("srv:%v submit cmd%v, index:%v term%v\n", kv.me, cmd, cmdindex, term)
 
 	for !kv.killed() {
 		time.Sleep(10 * time.Millisecond)
-		// fmt.Printf("every10ms check if%v commit\n", cmdindex)
+		// DPrintf("every10ms check if%v commit\n", cmdindex)
 		kv.rwmu.RLock()
-		// fmt.Printf("kv:%v term:%v curterm:%v\n", kv.me, term, kv.CurTerm)
+		// DPrintf("kv:%v term:%v curterm:%v\n", kv.me, term, kv.CurTerm)
 		if kv.CurTerm > term {
-			fmt.Printf("commit is old term, need restart\n")
+			DPrintf("commit is old term, need restart\n")
 			cmd.Status = ErrTermchanged
 			kv.rwmu.RUnlock()
 			break
 		}
-		// fmt.Printf("kv:%v curcomit%v cmdindex%v\n", kv.me, kv.CurCommitIndex, cmdindex)
+		// DPrintf("kv:%v curcomit%v cmdindex%v\n", kv.me, kv.CurCommitIndex, cmdindex)
 		if kv.CurCommitIndex >= cmdindex {
-			if ind, exist := kv.HistoryTran[cmd.ClientID][cmd.TranscationID]; exist {
-				if ind != cmdindex {
+			if kv.HistoryTran[cmd.ClientID] >= cmd.TranscationID {
+				if kv.HistoryTran[cmd.ClientID] > cmd.TranscationID {
 					cmd.Status = ErrCompleted
 				}
 				if cmd.Type == GET {
 					cmd.Value = kv.DataBase[cmd.Key]
 				}
 			} else {
-				fmt.Printf("cmd%v index%v not commit\n", cmd, cmdindex)
+				DPrintf("cmd%v index%v not commit\n", cmd, cmdindex)
 				cmd.Status = ErrNotcommit
 			}
 			// if cmd.ClientID != kv.CommitedOp[cmdindex] {
-			// 	fmt.Printf("cmd%v index%v not commit\n", cmd, cmdindex)
+			// 	DPrintf("cmd%v index%v not commit\n", cmd, cmdindex)
 			// 	cmd.Status = ErrNotcommit
 			// } else {
 			// 	if cmdindex != kv.HistoryTran[cmd.ClientID][cmd.TranscationID] {
@@ -218,13 +220,19 @@ func (kv *KVServer) applier(applyCh chan raft.ApplyMsg) {
 		if kv.killed() {
 			return
 		}
-		if !m.CommandValid {
-			fmt.Printf("not command,ignore\n")
-		} else {
+		if m.SnapshotValid {
+			index := m.SnapshotIndex
+			term := m.SnapshotTerm
+			data := m.Snapshot
+			kv.applySnapshot(index, term, data)
+		} else if m.CommandValid {
 			cmdindex := m.CommandIndex
 			cmd := m.Command.(Op)
-			// fmt.Printf("srv:%v reci command[%v]:%v\n", kv.me, cmdindex, cmd)
+			// DPrintf("srv:%v reci command[%v]:%v\n", kv.me, cmdindex, cmd)
 			kv.applyCommand(cmdindex, &cmd)
+		} else {
+			DPrintf("not command,ignore\n")
+
 		}
 	}
 }
@@ -232,40 +240,31 @@ func (kv *KVServer) applier(applyCh chan raft.ApplyMsg) {
 func (kv *KVServer) applyCommand(index int, cmd *Op) {
 	kv.rwmu.Lock()
 	defer kv.rwmu.Unlock()
-	fmt.Printf("apply command index%v\n", index)
-	if _, exists := kv.HistoryTran[cmd.ClientID]; !exists {
-		// 如果没有初始化嵌套的 map，则初始化
-		kv.HistoryTran[cmd.ClientID] = make(map[int]int)
-	}
+	DPrintf("apply command index%v\n", index)
 	// kv.CurTerm, _ = kv.rf.GetState()
 	kv.CurCommitIndex = index
 	// kv.CommitedOp[index] = cmd.ClientID
 	// client对不同server都进行start的情况，在apply时检查是否已提交了。
-	if _, exist := kv.HistoryTran[cmd.ClientID][cmd.TranscationID]; exist {
-		kv.HistoryTran[cmd.ClientID][cmd.TranscationID] = index
-		return
+	if kv.HistoryTran[cmd.ClientID] < cmd.TranscationID {
+		kv.HistoryTran[cmd.ClientID] = cmd.TranscationID
+		switch cmd.Type {
+		case PUT:
+			kv.DataBase[cmd.Key] = cmd.Value
+		case APPEND:
+			kv.DataBase[cmd.Key] += cmd.Value
+		}
 	}
-
-	kv.HistoryTran[cmd.ClientID][cmd.TranscationID] = index
-	switch cmd.Type {
-	case GET:
-		// kv.CommitedforGet[index] = kv.DataBase[cmd.Key]
-
-	case PUT:
-		kv.DataBase[cmd.Key] = cmd.Value
-	case APPEND:
-		// _, exists := kv.HistoryData[cmd.ClientID]
-		// if !exists {
-		// kv.HistoryData[cmd.ClientID] = kv.DataBase[cmd.Key]
-		kv.DataBase[cmd.Key] += cmd.Value
-
-		// }
-		// case REPORT:
-		// delete(kv.HistoryData, cmd.ClientID)
+	// kv.HistoryTran[cmd.ClientID][cmd.TranscationID] = index
+	if kv.maxraftstate > 0 {
+		if (index+1)%30 == 0 {
+			DPrintf("me:%v call snapshot\n", kv.me)
+			w := new(bytes.Buffer)
+			e := labgob.NewEncoder(w)
+			e.Encode(kv.DataBase)
+			e.Encode(kv.HistoryTran)
+			kv.rf.Snapshot(index, w.Bytes())
+		}
 	}
-	// if len(kv.CommitedOp) != index {
-	// 	fmt.Printf("CommitedIndex wrong expect%v actal %v\n", len(kv.CommitedOp), index)
-	// }
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -314,11 +313,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.DataBase = make(map[string]string)
 	// kv.HistoryData = make(map[int64]string)
-	kv.HistoryTran = make(map[int64]map[int]int)
+	kv.HistoryTran = make(map[int64]int)
 	kv.CurCommitIndex = 0
 	// kv.CommitedOp = make(map[int]int64)
 	// kv.CommitedforGet = make(map[int]string)
 	kv.CurTerm = 0
+
+	kv.readSnapshot(persister.ReadSnapshot())
+
 	go kv.applier(kv.applyCh)
 	go kv.termgetter()
 	return kv
@@ -328,10 +330,39 @@ func (kv *KVServer) termgetter() {
 	for !kv.killed() {
 		time.Sleep(1000 * time.Millisecond)
 		curterm, _ := kv.rf.GetState()
-		// fmt.Printf("me:%v check term%v leader%v\n", kv.me, curterm, isLeader)
+		// DPrintf("me:%v check term%v leader%v\n", kv.me, curterm, isLeader)
 
 		kv.rwmu.Lock()
 		kv.CurTerm = curterm
 		kv.rwmu.Unlock()
 	}
+}
+
+func (kv *KVServer) readSnapshot(data []byte) {
+	// DPrintf("me:%v read snapshot\n", rf.me)
+
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	if err := d.Decode(&kv.DataBase); err != nil {
+		DPrintf("me:%v Read database error:%v\n", kv.me, err)
+		return
+	}
+
+	if err := d.Decode(&kv.HistoryTran); err != nil {
+		DPrintf("me:%v Read historytran error:%v\n", kv.me, err)
+		return
+	}
+}
+
+func (kv *KVServer) applySnapshot(index int, term int, data []byte) {
+	kv.rwmu.Lock()
+	defer kv.rwmu.Unlock()
+	DPrintf("apply snapshot index%v\n", index)
+	kv.CurCommitIndex = index
+	kv.CurTerm = term
+	kv.readSnapshot(data)
 }

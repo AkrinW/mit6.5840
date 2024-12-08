@@ -11,7 +11,6 @@ package raft
 
 import (
 	"bytes"
-	"fmt"
 	"sync"
 
 	"6.5840/labgob"
@@ -101,7 +100,7 @@ func (rf *Raft) persist() {
 	e := labgob.NewEncoder(w)
 	// e.Encode(rf.xxx)
 	// e.Encode(rf.yyy)
-	// fmt.Printf("me:%v start persist\n", rf.me)
+	// DPrintf("me:%v start persist\n", rf.me)
 	e.Encode(rf.term)
 	e.Encode(rf.voteTo)
 	e.Encode(rf.logs)
@@ -118,7 +117,7 @@ func (rf *Raft) persist() {
 	// rf.persister.Save(w.Bytes(), rf.snapshot.Data)
 	// if rf.snapshot != nil {
 	// 	if e.Encode(rf.snapshot.LastIndex) != nil || e.Encode(rf.snapshot.LastTerm) != nil {
-	// 		fmt.Printf("me:%v Encode Raft State Failed\n", rf.me)
+	// 		DPrintf("me:%v Encode Raft State Failed\n", rf.me)
 	// 	}
 	// 	rf.persister.Save(w.Bytes(), rf.snapshot.Data)
 	// } else {
@@ -128,7 +127,7 @@ func (rf *Raft) persist() {
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
-	// fmt.Printf("me:%v read persist\n", rf.me)
+	// DPrintf("me:%v read persist\n", rf.me)
 
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
@@ -147,47 +146,47 @@ func (rf *Raft) readPersist(data []byte) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	if err := d.Decode(&Term); err != nil {
-		fmt.Printf("me:%v Read term error:%v\n", rf.me, err)
+		DPrintf("me:%v Read term error:%v\n", rf.me, err)
 		return
 	}
 	rf.term = Term
 
 	if err := d.Decode(&Voteto); err != nil {
-		fmt.Printf("me:%v Read voteto error:%v\n", rf.me, err)
+		DPrintf("me:%v Read voteto error:%v\n", rf.me, err)
 		return
 	}
 	rf.voteTo = Voteto
 
 	if err := d.Decode(&Log); err != nil {
-		fmt.Printf("me:%v Read log error:%v\n", rf.me, err)
+		DPrintf("me:%v Read log error:%v\n", rf.me, err)
 		return
 	}
 	rf.logs = Log
 
 	// if err := d.Decode(&CommitIndex); err != nil {
-	// 	fmt.Printf("me:%v Read Commitindex error:%v\n", rf.me, err)
+	// 	DPrintf("me:%v Read Commitindex error:%v\n", rf.me, err)
 	// 	return
 	// }
 	// rf.commitIndex = CommitIndex
 
 	if err := d.Decode(&Snapoffset); err != nil {
-		fmt.Printf("me:%v Read snapoffset error:%v\n", rf.me, err)
+		DPrintf("me:%v Read snapoffset error:%v\n", rf.me, err)
 		return
 	}
 	rf.snapoffset = Snapoffset
 
 	if err := d.Decode(&NextIndex); err != nil {
-		fmt.Printf("me:%v Read nextindex error:%v\n", rf.me, err)
+		DPrintf("me:%v Read nextindex error:%v\n", rf.me, err)
 	}
 	rf.nextIndex = NextIndex
 
 	if err := d.Decode(&LastIndex); err != nil {
-		fmt.Printf("me:%v Read lastindex error:%v\n", rf.me, err)
+		DPrintf("me:%v Read lastindex error:%v\n", rf.me, err)
 	}
 	rf.snapshot.LastIndex = LastIndex
 
 	if err := d.Decode(&LastTerm); err != nil {
-		fmt.Printf("me:%v Read lastterm error:%v\n", rf.me, err)
+		DPrintf("me:%v Read lastterm error:%v\n", rf.me, err)
 	}
 	rf.snapshot.LastTerm = LastTerm
 

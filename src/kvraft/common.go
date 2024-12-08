@@ -1,15 +1,12 @@
 package kvraft
 
-import (
-	"fmt"
-	"log"
-)
+import "fmt"
 
 const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
-		log.Printf(format, a...)
+		fmt.Printf(format, a...)
 	}
 	return
 }
@@ -48,11 +45,11 @@ type KVReply struct {
 }
 
 func (args *KVArgs) Print() {
-	fmt.Printf("Args Client:%v Trans:%v Type:%v Key%v Value%v\n", args.ClientID, args.TranscationID, args.Type, args.Key, args.Value)
+	DPrintf("Args Client:%v Trans:%v Type:%v Key%v Value%v\n", args.ClientID, args.TranscationID, args.Type, args.Key, args.Value)
 }
 
 func (reply *KVReply) Print() {
-	fmt.Printf("Reply Server:%v Value:%v Err:%v\n", reply.ServerID, reply.Value, reply.Err)
+	DPrintf("Reply Server:%v Value:%v Err:%v\n", reply.ServerID, reply.Value, reply.Err)
 }
 
 type Op struct {
