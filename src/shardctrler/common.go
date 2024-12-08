@@ -1,5 +1,7 @@
 package shardctrler
 
+import "fmt"
+
 //
 // Shard controller: assigns shards to replication groups.
 //
@@ -29,45 +31,157 @@ type Config struct {
 }
 
 const (
-	OK = "OK"
+	OK             = "OK"
+	ErrNoKey       = "ErrNoKey"
+	ErrWrongLeader = "ErrWrongLeader"
+	ErrKilled      = "ErrKilled"
+	ErrTermchanged = "ErrTermchanged"
+	ErrNotcommit   = "ErrNotcommit"
+	ErrCompleted   = "ErrCompleted"
+)
+
+const (
+	JOIN  = "Join"
+	LEAVE = "Leave"
+	MOVE  = "Move"
+	QUERY = "Query"
 )
 
 type Err string
 
 type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
+	ClientID      int64
+	TranscationID int
+	Type          string
+	Servers       map[int][]string // new GID -> servers mappings
 }
 
 type JoinReply struct {
+	ServerID    int
 	WrongLeader bool
 	Err         Err
 }
 
 type LeaveArgs struct {
-	GIDs []int
+	ClientID      int64
+	TranscationID int
+	Type          string
+	GIDs          []int
 }
 
 type LeaveReply struct {
+	ServerID    int
 	WrongLeader bool
 	Err         Err
 }
 
 type MoveArgs struct {
-	Shard int
-	GID   int
+	ClientID      int64
+	TranscationID int
+	Type          string
+	Shard         int
+	GID           int
 }
 
 type MoveReply struct {
+	ServerID    int
 	WrongLeader bool
 	Err         Err
 }
 
 type QueryArgs struct {
-	Num int // desired config number
+	ClientID      int64
+	TranscationID int
+	Type          string
+	Num           int // desired config number
 }
 
 type QueryReply struct {
+	ServerID    int
 	WrongLeader bool
 	Err         Err
 	Config      Config
+}
+
+const Debug = false
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug {
+		fmt.Printf(format, a...)
+	}
+	return
+}
+
+type Args interface {
+	Print()
+	getType() string
+}
+
+type Reply interface {
+	Print()
+	getErr() Err
+}
+
+func (args *JoinArgs) Print() {
+	DPrintf("JoinArgs:%v\n", args)
+}
+
+func (args *JoinArgs) getType() string {
+	return args.Type
+}
+
+func (reply *JoinReply) Print() {
+	DPrintf("JoinReply:%v\n", reply)
+}
+
+func (reply *JoinReply) getErr() Err {
+	return reply.Err
+}
+
+func (args *LeaveArgs) Print() {
+	DPrintf("LeaveArgs:%v\n", args)
+}
+
+func (args *LeaveArgs) getType() string {
+	return args.Type
+}
+
+func (reply *LeaveReply) Print() {
+	DPrintf("LeaveReply:%v\n", reply)
+}
+
+func (reply *LeaveReply) getErr() Err {
+	return reply.Err
+}
+
+func (args *MoveArgs) Print() {
+	DPrintf("MoveArgs:%v\n", args)
+}
+
+func (args *MoveArgs) getType() string {
+	return args.Type
+}
+
+func (reply *MoveReply) Print() {
+	DPrintf("MoveReply:%v\n", reply)
+}
+
+func (reply *MoveReply) getErr() Err {
+	return reply.Err
+}
+
+func (args *QueryArgs) Print() {
+	DPrintf("QueryArgs:%v\n", args)
+}
+
+func (args *QueryArgs) getType() string {
+	return args.Type
+}
+
+func (reply *QueryReply) Print() {
+	DPrintf("QueryReply:%v\n", reply)
+}
+
+func (reply *QueryReply) getErr() Err {
+	return reply.Err
 }
