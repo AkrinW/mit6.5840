@@ -37,27 +37,24 @@ type KVServer struct {
 func (kv *KVServer) Get(args *KVArgs, reply *KVReply) {
 	// Your code here.
 	// DPrintf("srv%v reci %v's Get[%v] Trans:%v\n", kv.me, args.ClientID, args.Key, args.TranscationID)
-	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value, OK}
-	kv.submitCommand(&command)
+	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value}
+	reply.Value, reply.Err = kv.submitCommand(&command)
 
 	reply.ServerID = kv.me
-	reply.Err = command.Status
 	if reply.Err != OK && reply.Err != ErrCompleted {
 		// DPrintf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
 		return
 	}
-	reply.Value = command.Value
 	// kv.HistoryTran[args.ClientID] = args.TranscationID
 }
 
 func (kv *KVServer) Put(args *KVArgs, reply *KVReply) {
 	// Your code here.
 	// DPrintf("srv%v reci %v's Put[%v]=%v Trans:%v\n", kv.me, args.ClientID, args.Key, args.Value, args.TranscationID)
-	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value, OK}
-	kv.submitCommand(&command)
+	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value}
+	_, reply.Err = kv.submitCommand(&command)
 
 	reply.ServerID = kv.me
-	reply.Err = command.Status
 	if reply.Err != OK && reply.Err != ErrCompleted {
 		// DPrintf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
 		return
@@ -71,11 +68,10 @@ func (kv *KVServer) Put(args *KVArgs, reply *KVReply) {
 func (kv *KVServer) Append(args *KVArgs, reply *KVReply) {
 	// Your code here.
 	// DPrintf("srv%v reci %v's Append[%v]+%v Trans:%v\n", kv.me, args.ClientID, args.Key, args.Value, args.TranscationID)
-	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value, OK}
-	kv.submitCommand(&command)
+	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value}
+	_, reply.Err = kv.submitCommand(&command)
 
 	reply.ServerID = kv.me
-	reply.Err = command.Status
 	if reply.Err != OK && reply.Err != ErrCompleted {
 		// DPrintf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
 		return
@@ -111,7 +107,9 @@ func (kv *KVServer) Append(args *KVArgs, reply *KVReply) {
 // 	// delete(kv.HistoryData, args.ClientID)
 // }
 
-func (kv *KVServer) submitCommand(cmd *Op) {
+func (kv *KVServer) submitCommand(cmd *Op) (string, Err) {
+	output := ""
+	err := Err(OK)
 
 	kv.rwmu.RLock()
 	// unreliable环境，需要检查提交是否重复
@@ -135,21 +133,22 @@ func (kv *KVServer) submitCommand(cmd *Op) {
 	if kv.HistoryTran[cmd.ClientID] >= cmd.TranscationID {
 		// 已执行完成的cmd，直接返回已有结果
 		// DPrintf("completed cmd%v, return\n", cmd)
-		cmd.Status = ErrCompleted
+		err = ErrCompleted
 		if cmd.Type == GET {
 			// index := kv.HistoryTran[cmd.ClientID][cmd.TranscationID]
 			// cmd.Value = kv.CommitedOp[index].Value
 			// cmd.Value = kv.CommitedforGet[index]
-			cmd.Value = kv.DataBase[cmd.Key]
+			output = kv.DataBase[cmd.Key]
 		}
 		kv.rwmu.RUnlock()
-		return
+		return output, err
 	}
 	kv.rwmu.RUnlock()
-	cmdindex, term, isLeader := kv.rf.Start(*cmd)
+	cmdshell := OpShell{cmd}
+	cmdindex, term, isLeader := kv.rf.Start(cmdshell)
 	if !isLeader {
-		cmd.Status = ErrWrongLeader
-		return
+		err = ErrWrongLeader
+		return output, err
 	}
 	DPrintf("srv:%v submit cmd%v, index:%v term%v\n", kv.me, cmd, cmdindex, term)
 
@@ -160,7 +159,7 @@ func (kv *KVServer) submitCommand(cmd *Op) {
 		// DPrintf("kv:%v term:%v curterm:%v\n", kv.me, term, kv.CurTerm)
 		if kv.CurTerm > term {
 			DPrintf("commit is old term, need restart\n")
-			cmd.Status = ErrTermchanged
+			err = ErrTermchanged
 			kv.rwmu.RUnlock()
 			break
 		}
@@ -168,14 +167,14 @@ func (kv *KVServer) submitCommand(cmd *Op) {
 		if kv.CurCommitIndex >= cmdindex {
 			if kv.HistoryTran[cmd.ClientID] >= cmd.TranscationID {
 				if kv.HistoryTran[cmd.ClientID] > cmd.TranscationID {
-					cmd.Status = ErrCompleted
+					err = ErrCompleted
 				}
 				if cmd.Type == GET {
-					cmd.Value = kv.DataBase[cmd.Key]
+					output = kv.DataBase[cmd.Key]
 				}
 			} else {
 				DPrintf("cmd%v index%v not commit\n", cmd, cmdindex)
-				cmd.Status = ErrNotcommit
+				err = ErrNotcommit
 			}
 			// if cmd.ClientID != kv.CommitedOp[cmdindex] {
 			// 	DPrintf("cmd%v index%v not commit\n", cmd, cmdindex)
@@ -210,8 +209,9 @@ func (kv *KVServer) submitCommand(cmd *Op) {
 	// }
 
 	if kv.killed() {
-		cmd.Status = ErrKilled
+		err = ErrKilled
 	}
+	return output, err
 }
 
 func (kv *KVServer) applier(applyCh chan raft.ApplyMsg) {
@@ -227,9 +227,10 @@ func (kv *KVServer) applier(applyCh chan raft.ApplyMsg) {
 			kv.applySnapshot(index, term, data)
 		} else if m.CommandValid {
 			cmdindex := m.CommandIndex
-			cmd := m.Command.(Op)
+			cmd := m.Command.(OpShell).Operate
+
 			// DPrintf("srv:%v reci command[%v]:%v\n", kv.me, cmdindex, cmd)
-			kv.applyCommand(cmdindex, &cmd)
+			kv.applyCommand(cmdindex, cmd)
 		} else {
 			DPrintf("not command,ignore\n")
 
@@ -301,7 +302,8 @@ func (kv *KVServer) killed() bool {
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
-	labgob.Register(Op{})
+	// labgob.Register(Op{})
+	labgob.Register(OpShell{})
 
 	kv := new(KVServer)
 	kv.me = me

@@ -61,5 +61,8 @@ type Op struct {
 	Type          string
 	Key           string
 	Value         string
-	Status        Err
+}
+
+type OpShell struct {
+	Operate *Op
 }

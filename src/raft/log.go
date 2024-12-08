@@ -105,6 +105,10 @@ func (rf *Raft) committochan(targetindex int, funcname string) {
 		if rf.killed() {
 			return
 		}
+		if rf.commitIndex-rf.snapoffset+1 >= len(rf.logs) {
+			DPrintf("me:%v commit log out index,break%v %v %v\n", rf.me, rf.commitIndex, rf.snapoffset, len(rf.logs))
+			break
+		}
 		rf.commitIndex++
 		i++
 		DPrintf("me:%v commit log[%v] func:%v\n", rf.me, rf.commitIndex, funcname)
