@@ -23,7 +23,7 @@ type ShardKV struct {
 
 	// Your definitions here.
 	dead           int32
-	DataBase       map[string]string
+	DataBase       map[int]map[string]string
 	CurCommitIndex int
 	CurTerm        int
 	HistoryTran    map[int64]int
@@ -78,7 +78,7 @@ func (kv *ShardKV) submitCommand(cmd *Op) (string, Err) {
 		// DPrintf("completed cmd%v, return\n", cmd)
 		err = ErrCompleted
 		if cmd.Type == GET {
-			output = kv.DataBase[cmd.Key]
+			output = kv.DataBase[cmd.Shard][cmd.Key]
 		}
 		kv.rwmu.RUnlock()
 		return output, err
@@ -121,7 +121,7 @@ func (kv *ShardKV) submitCommand(cmd *Op) (string, Err) {
 					err = ErrCompleted
 				}
 				if cmd.Type == GET {
-					output = kv.DataBase[cmd.Key]
+					output = kv.DataBase[cmd.Shard][cmd.Key]
 				}
 			} else {
 				DPrintf("cmd%v index%v not commit\n", cmd, cmdindex)
@@ -175,9 +175,9 @@ func (kv *ShardKV) applyCommand(index int, cmd *Op) {
 		kv.HistoryTran[cmd.ClientID] = cmd.TranscationID
 		switch cmd.Type {
 		case PUT:
-			kv.DataBase[cmd.Key] = cmd.Value
+			kv.DataBase[cmd.Shard][cmd.Key] = cmd.Value
 		case APPEND:
-			kv.DataBase[cmd.Key] += cmd.Value
+			kv.DataBase[cmd.Shard][cmd.Key] += cmd.Value
 		}
 	}
 	// kv.HistoryTran[cmd.ClientID][cmd.TranscationID] = index
@@ -257,7 +257,10 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	kv.sm = shardctrler.MakeClerk(kv.ctrlers)
 	kv.dead = 0
-	kv.DataBase = make(map[string]string)
+	kv.DataBase = make(map[int]map[string]string)
+	for i := 0; i < shardctrler.NShards; i++ {
+		kv.DataBase[i] = make(map[string]string)
+	}
 	kv.HistoryTran = make(map[int64]int)
 	kv.CurCommitIndex = 0
 	kv.CurTerm = 0
