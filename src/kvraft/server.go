@@ -329,14 +329,17 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 }
 
 func (kv *KVServer) termgetter() {
+	lastterm := 0
 	for !kv.killed() {
 		time.Sleep(1000 * time.Millisecond)
 		curterm, _ := kv.rf.GetState()
 		// DPrintf("me:%v check term%v leader%v\n", kv.me, curterm, isLeader)
-
-		kv.rwmu.Lock()
-		kv.CurTerm = curterm
-		kv.rwmu.Unlock()
+		if curterm > lastterm {
+			kv.rwmu.Lock()
+			kv.CurTerm = curterm
+			lastterm = curterm
+			kv.rwmu.Unlock()
+		}
 	}
 }
 

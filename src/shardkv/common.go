@@ -44,6 +44,7 @@ type KVArgs struct {
 	TranscationID int
 	Type          string
 	Key           string
+	Shard         int
 	Value         string
 }
 
@@ -61,6 +62,7 @@ type Op struct {
 	TranscationID int
 	Type          string
 	Key           string
+	Shard         int
 	Value         string
 }
 

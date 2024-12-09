@@ -264,14 +264,17 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 }
 
 func (sc *ShardCtrler) termgetter() {
+	lastterm := 0
 	for !sc.killed() {
 		time.Sleep(1000 * time.Millisecond)
 		curterm, _ := sc.rf.GetState()
 		// DPrintf("me:%v check term%v leader%v\n", kv.me, curterm, isLeader)
-
-		sc.rwmu.Lock()
-		sc.CurTerm = curterm
-		sc.rwmu.Unlock()
+		if curterm > lastterm {
+			sc.rwmu.Lock()
+			sc.CurTerm = curterm
+			lastterm = curterm
+			sc.rwmu.Unlock()
+		}
 	}
 }
 

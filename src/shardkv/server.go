@@ -8,6 +8,7 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
+	"6.5840/shardctrler"
 )
 
 type ShardKV struct {
@@ -26,12 +27,14 @@ type ShardKV struct {
 	CurCommitIndex int
 	CurTerm        int
 	HistoryTran    map[int64]int
+	CurConfig      shardctrler.Config
+	sm             *shardctrler.Clerk
 }
 
 func (kv *ShardKV) Get(args *KVArgs, reply *KVReply) {
 	// Your code here.
 	// DPrintf("srv%v reci %v's Get[%v] Trans:%v\n", kv.me, args.ClientID, args.Key, args.TranscationID)
-	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value}
+	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Shard, args.Value}
 	reply.Value, reply.Err = kv.submitCommand(&command)
 
 	reply.ServerID = kv.me
@@ -44,7 +47,7 @@ func (kv *ShardKV) Get(args *KVArgs, reply *KVReply) {
 func (kv *ShardKV) Put(args *KVArgs, reply *KVReply) {
 	// Your code here.
 	// DPrintf("srv%v reci %v's Put[%v]=%v Trans:%v\n", kv.me, args.ClientID, args.Key, args.Value, args.TranscationID)
-	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value}
+	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Shard, args.Value}
 	_, reply.Err = kv.submitCommand(&command)
 
 	reply.ServerID = kv.me
@@ -56,7 +59,7 @@ func (kv *ShardKV) Put(args *KVArgs, reply *KVReply) {
 
 func (kv *ShardKV) Append(args *KVArgs, reply *KVReply) {
 	// DPrintf("srv%v reci %v's Append[%v]+%v Trans:%v\n", kv.me, args.ClientID, args.Key, args.Value, args.TranscationID)
-	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Value}
+	command := Op{args.ClientID, args.TranscationID, args.Type, args.Key, args.Shard, args.Value}
 	_, reply.Err = kv.submitCommand(&command)
 
 	reply.ServerID = kv.me
@@ -80,6 +83,12 @@ func (kv *ShardKV) submitCommand(cmd *Op) (string, Err) {
 		kv.rwmu.RUnlock()
 		return output, err
 	}
+	if kv.CurConfig.Shards[cmd.Shard] != kv.gid {
+		err = ErrWrongGroup
+		DPrintf("shard:%v not this group%v-%v,cfg:%v\n", cmd.Shard, kv.gid, kv.me, kv.CurConfig)
+		kv.rwmu.RUnlock()
+		return output, err
+	}
 	kv.rwmu.RUnlock()
 	cmdshell := OpShell{cmd}
 	cmdindex, term, isLeader := kv.rf.Start(cmdshell)
@@ -87,7 +96,7 @@ func (kv *ShardKV) submitCommand(cmd *Op) (string, Err) {
 		err = ErrWrongLeader
 		return output, err
 	}
-	DPrintf("srv:%v submit cmd%v, index:%v term%v\n", kv.me, cmd, cmdindex, term)
+	DPrintf("srv:%v-%v submit cmd%v, index:%v term%v\n", kv.gid, kv.me, cmd, cmdindex, term)
 
 	for !kv.killed() {
 		time.Sleep(10 * time.Millisecond)
@@ -98,6 +107,12 @@ func (kv *ShardKV) submitCommand(cmd *Op) (string, Err) {
 			err = ErrTermchanged
 			kv.rwmu.RUnlock()
 			break
+		}
+		if kv.CurConfig.Shards[cmd.Shard] != kv.gid {
+			err = ErrWrongGroup
+			DPrintf("shard:%v not this group%v-%v,cfg:%v\n", cmd.Shard, kv.gid, kv.me, kv.CurConfig)
+			kv.rwmu.RUnlock()
+			return output, err
 		}
 		// DPrintf("kv:%v curcomit%v cmdindex%v\n", kv.me, kv.CurCommitIndex, cmdindex)
 		if kv.CurCommitIndex >= cmdindex {
@@ -135,12 +150,12 @@ func (kv *ShardKV) applier(applyCh chan raft.ApplyMsg) {
 			index := m.SnapshotIndex
 			term := m.SnapshotTerm
 			data := m.Snapshot
-			DPrintf("srv:%v reci snapshot[%v]term%v:%v\n", kv.me, index, term, data)
+			DPrintf("srv:%v-%v reci snapshot[%v]term%v:%v\n", kv.gid, kv.me, index, term, data)
 			// kv.applySnapshot(index, term, data)
 		} else if m.CommandValid {
 			cmdindex := m.CommandIndex
 			cmd := m.Command.(OpShell).Operate
-			DPrintf("srv:%v reci command[%v]:%v\n", kv.me, cmdindex, cmd)
+			DPrintf("srv:%v-%v reci command[%v]:%v\n", kv.gid, kv.me, cmdindex, cmd)
 			kv.applyCommand(cmdindex, cmd)
 		} else {
 			DPrintf("not command,ignore\n")
@@ -240,6 +255,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
+	kv.sm = shardctrler.MakeClerk(kv.ctrlers)
 	kv.dead = 0
 	kv.DataBase = make(map[string]string)
 	kv.HistoryTran = make(map[int64]int)
@@ -250,18 +266,39 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	go kv.applier(kv.applyCh)
 	go kv.termgetter()
+	go kv.cfggetter()
 
 	return kv
 }
 
 func (kv *ShardKV) termgetter() {
+	lastterm := 0
 	for !kv.killed() {
 		time.Sleep(1000 * time.Millisecond)
 		curterm, _ := kv.rf.GetState()
 		// DPrintf("me:%v check term%v leader%v\n", kv.me, curterm, isLeader)
+		if curterm > lastterm {
+			kv.rwmu.Lock()
+			kv.CurTerm = curterm
+			lastterm = curterm
+			kv.rwmu.Unlock()
+		}
+	}
+}
 
-		kv.rwmu.Lock()
-		kv.CurTerm = curterm
-		kv.rwmu.Unlock()
+// 每个server定期向ctrler获取当前的config
+func (kv *ShardKV) cfggetter() {
+	lastnum := 0
+	curconfig := shardctrler.Config{}
+	for !kv.killed() {
+		time.Sleep(100 * time.Millisecond)
+		curconfig = kv.sm.Query(-1)
+		if lastnum != curconfig.Num {
+			kv.rwmu.Lock()
+			kv.CurConfig = curconfig
+			lastnum = curconfig.Num
+			DPrintf("me:%v-%v curconfig%v\n", kv.gid, kv.me, kv.CurConfig)
+			kv.rwmu.Unlock()
+		}
 	}
 }

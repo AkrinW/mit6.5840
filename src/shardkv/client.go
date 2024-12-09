@@ -92,6 +92,7 @@ func (ck *Clerk) Append(key string, value string) {
 
 func (ck *Clerk) CallServer(args *KVArgs, reply *KVReply) {
 	shard := key2shard(args.Key)
+	args.Shard = shard
 	op := args.Type
 	for {
 		gid := ck.config.Shards[shard]
@@ -103,7 +104,7 @@ func (ck *Clerk) CallServer(args *KVArgs, reply *KVReply) {
 					continue
 				}
 				if reply.Err == OK {
-					DPrintf("cl%v %v to srv%v succeed\n", ck.clientID, op, server)
+					DPrintf("cl%v %v to srv%v succeed\n", ck.clientID, op, server[si])
 					return
 				}
 				if reply.Err == ErrCompleted {
