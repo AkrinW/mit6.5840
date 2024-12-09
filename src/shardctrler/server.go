@@ -1,6 +1,7 @@
 package shardctrler
 
 import (
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,8 +22,9 @@ type ShardCtrler struct {
 	HistoryTran    map[int64]int
 	CurCommitIndex int
 	CurTerm        int
-
-	configs []Config // indexed by config num
+	configlen      int
+	configs        []Config    // indexed by config num
+	allocates      map[int]int // 记录每个group分配的shard数量
 }
 
 type Op struct {
@@ -30,15 +32,20 @@ type Op struct {
 	ClientID      int64
 	TranscationID int
 	Type          string
-	Servers       map[int][]string
-	GIDs          []int
-	Shard         int
-	GID           int
-	Num           int // desired config number
+	Servers       map[int][]string // join
+	GIDs          []int            // leave
+	Shard         int              // move
+	GID           int              // move
+	Num           int              // query desired config number
 }
 
 type OpShell struct {
 	Operate *Op
+}
+
+type BalanceKV struct {
+	gid   int
+	value int
 }
 
 func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
@@ -48,7 +55,7 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 
 	reply.ServerID = sc.me
 	if reply.Err != OK && reply.Err != ErrCompleted {
-		// DPrintf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
+		// DPrintf("srv%v submit command%v fail:%v\n", sc.me, command, reply.Err)
 		return
 	}
 }
@@ -60,7 +67,7 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 
 	reply.ServerID = sc.me
 	if reply.Err != OK && reply.Err != ErrCompleted {
-		// DPrintf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
+		// DPrintf("srv%v submit command%v fail:%v\n", sc.me, command, reply.Err)
 		return
 	}
 }
@@ -72,7 +79,7 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 
 	reply.ServerID = sc.me
 	if reply.Err != OK && reply.Err != ErrCompleted {
-		// DPrintf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
+		// DPrintf("srv%v submit command%v fail:%v\n", sc.me, command, reply.Err)
 		return
 	}
 }
@@ -84,21 +91,21 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 
 	reply.ServerID = sc.me
 	if reply.Err != OK && reply.Err != ErrCompleted {
-		// DPrintf("srv%v submit command%v fail:%v\n", kv.me, command, reply.Err)
+		// DPrintf("srv%v submit command%v fail:%v\n", sc.me, command, reply.Err)
 		return
 	}
 }
 
 func (sc *ShardCtrler) submitCommand(cmd *Op) (Config, Err) {
 	cfg := Config{}
-	err := Err("")
+	err := Err(OK)
 
 	// 这里基本全照抄kvraft的实现
 	sc.rwmu.RLock()
 	if sc.HistoryTran[cmd.ClientID] >= cmd.TranscationID {
 		err = ErrCompleted
 		if cmd.Type == QUERY {
-			cfg = Config{}
+			cfg = sc.execQUERY(cmd.Num)
 		}
 		sc.rwmu.RUnlock()
 		return cfg, err
@@ -130,7 +137,7 @@ func (sc *ShardCtrler) submitCommand(cmd *Op) (Config, Err) {
 					err = ErrCompleted
 				}
 				if cmd.Type == QUERY {
-					cfg = Config{}
+					cfg = sc.execQUERY(cmd.Num)
 				}
 			} else {
 				DPrintf("cmd%v index%v not commit\n", cmd, cmdindex)
@@ -183,15 +190,16 @@ func (sc *ShardCtrler) applyCommand(index int, cmd *Op) {
 		sc.HistoryTran[cmd.ClientID] = cmd.TranscationID
 		switch cmd.Type {
 		case QUERY:
-
+			// do nothing only record
 		case JOIN:
-
+			sc.execJOIN(cmd.Servers)
 		case MOVE:
-
+			sc.execMOVE(cmd.Shard, cmd.GID)
 		case LEAVE:
-
+			sc.execLEAVE(cmd.GIDs)
 		}
 	}
+	DPrintf("me:%v allocate:%v config:%v\n", sc.me, sc.allocates, sc.configs[sc.configlen-1])
 	// if sc.maxraftstate > 0 {
 	// 	if (index+1)%30 == 0 {
 	// 		DPrintf("me:%v call snapshot\n", sc.me)
@@ -245,6 +253,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sc.CurCommitIndex = 0
 	sc.CurTerm = 0
 	sc.HistoryTran = make(map[int64]int)
+	sc.configlen = 1
+	sc.allocates = make(map[int]int)
 	// sc.readSnapshot(persister.ReadSnapshot())
 
 	go sc.applier(sc.applyCh)
@@ -262,5 +272,153 @@ func (sc *ShardCtrler) termgetter() {
 		sc.rwmu.Lock()
 		sc.CurTerm = curterm
 		sc.rwmu.Unlock()
+	}
+}
+
+func (sc *ShardCtrler) execQUERY(num int) Config {
+	if num == -1 || num >= sc.configlen {
+		return sc.configs[sc.configlen-1]
+	}
+	return sc.configs[num]
+}
+
+func (sc *ShardCtrler) execMOVE(shard int, gid int) {
+	var newShards [NShards]int
+	deepCopyShards(&newShards, sc.configs[sc.configlen-1].Shards)
+	newGroups := deepCopyGroup(sc.configs[sc.configlen-1].Groups)
+
+	sc.allocates[newShards[shard]]--
+	newShards[shard] = gid
+	sc.allocates[newShards[shard]]++
+
+	newcfg := Config{sc.configlen, newShards, newGroups}
+	sc.configs = append(sc.configs, newcfg)
+	sc.configlen++
+}
+
+func (sc *ShardCtrler) execLEAVE(gids []int) {
+	var newShards [NShards]int
+	deepCopyShards(&newShards, sc.configs[sc.configlen-1].Shards)
+	newGroups := deepCopyGroup(sc.configs[sc.configlen-1].Groups)
+
+	DPrintf("newgroup%v\n", newGroups)
+	for i := 0; i < len(gids); i++ {
+		delete(newGroups, gids[i])
+		delete(sc.allocates, gids[i])
+		for j := 0; j < len(newShards); j++ {
+			if newShards[j] == gids[i] {
+				newShards[j] = 0
+			}
+		}
+	}
+	sc.balance(&newShards)
+	DPrintf("afterdelete%v\n", newGroups)
+
+	newcfg := Config{sc.configlen, newShards, newGroups}
+	sc.configs = append(sc.configs, newcfg)
+	sc.configlen++
+}
+
+func (sc *ShardCtrler) execJOIN(servers map[int][]string) {
+	var newShards [NShards]int
+	deepCopyShards(&newShards, sc.configs[sc.configlen-1].Shards)
+	newGroups := deepCopyGroup(sc.configs[sc.configlen-1].Groups)
+
+	for key, value := range servers {
+		newSlice := make([]string, len(value))
+		copy(newSlice, value)
+		sc.allocates[key] = 0
+		newGroups[key] = newSlice
+	}
+	DPrintf("joinbefore balance%v\n", newGroups)
+	sc.balance(&newShards)
+	DPrintf("joinafter balance %v\n", newGroups)
+	newcfg := Config{sc.configlen, newShards, newGroups}
+	sc.configs = append(sc.configs, newcfg)
+	sc.configlen++
+}
+
+func deepCopyGroup(original map[int][]string) map[int][]string {
+	copyMap := make(map[int][]string)
+	for key, value := range original {
+		newSlice := make([]string, len(value))
+		copy(newSlice, value)
+		copyMap[key] = newSlice
+	}
+	return copyMap
+}
+
+func deepCopyShards(new *[NShards]int, origin [NShards]int) {
+	for i := 0; i < NShards; i++ {
+		new[i] = origin[i]
+	}
+}
+
+func (sc *ShardCtrler) balance(shards *[NShards]int) {
+	// 1.注意balance的写法，因为map读取的随机性，在不同的server上执行会导致不同的结果
+	// 一定要维持操作的一致性
+	// 把allocate提取出来，按value大到小,gid小到大的顺序排序
+	// 把value最多的分配给最少的
+	// 2.测试中出现group大于shard数量的情况。这时group分配的shard为0
+	// sc.allocates需要记录shard为0的group情况
+	lengroup := len(sc.allocates)
+	if lengroup == 0 {
+		return
+	}
+	target := NShards / lengroup
+	remainder := NShards % lengroup
+
+	var sorted []BalanceKV
+	for gid, v := range sc.allocates {
+		sorted = append(sorted, BalanceKV{gid: gid, value: v})
+	}
+	// 按 value 排序，如果 value 相同，则按 gid 排序
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].value == sorted[j].value {
+			return sorted[i].gid < sorted[j].gid
+		}
+		return sorted[i].value > sorted[j].value
+	})
+
+	for i := 0; i < len(sorted); i++ {
+		gid := sorted[i].gid
+		sc.allocates[gid] = i
+		sorted[i].value -= target
+		if remainder > 0 {
+			sorted[i].value--
+			remainder--
+		}
+	}
+
+	flag := len(sorted) - 1
+	for i := 0; i < len(shards); i++ {
+		gid := shards[i]
+		for flag >= 0 && sorted[flag].value == 0 {
+			flag--
+		}
+		if flag < 0 {
+			break
+		}
+		if index, exist := sc.allocates[gid]; !exist {
+			// 未分配的shard，直接给最少group
+			shards[i] = sorted[flag].gid
+			sorted[flag].value++
+		} else {
+			if sorted[index].value > 0 {
+				// 是溢出的shard，分配给最少group
+				shards[i] = sorted[flag].gid
+				sorted[flag].value++
+				sorted[index].value--
+			}
+		}
+	}
+
+	// 这样写是为了保证allocates里记录了所有group情况
+	for i := 0; i < len(sorted); i++ {
+		gid := sorted[i].gid
+		sc.allocates[gid] = 0
+	}
+	for i := 0; i < len(shards); i++ {
+		sc.allocates[shards[i]]++
 	}
 }

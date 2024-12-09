@@ -6,7 +6,6 @@ package shardctrler
 
 import (
 	"crypto/rand"
-	"fmt"
 	"math/big"
 	"time"
 
@@ -76,13 +75,13 @@ func (ck *Clerk) CallServer(args Args, reply Reply) {
 	curserver := leader
 	op := args.getType()
 	for {
-		fmt.Printf("cl%v %v to srv%v\n", ck.clientID, op, curserver)
+		DPrintf("cl%v %v to srv%v\n", ck.clientID, op, curserver)
 		ok := ck.servers[curserver].Call("ShardCtrler."+op, args, reply)
 		if !ok || reply.getErr() == ErrKilled || reply.getErr() == ErrWrongLeader {
-			// fmt.Printf("cl%v %v to srv%v failed:%v\n", ck.clientID, op, curserver, reply.Err)
+			// DPrintf("cl%v %v to srv%v failed:%v\n", ck.clientID, op, curserver, reply.Err)
 			curserver = (curserver + 1) % ck.serverNum
 			if curserver == leader {
-				// fmt.Printf("cl%v %v but no leader, wait 0.3s\n", ck.clientID, op)
+				// DPrintf("cl%v %v but no leader, wait 0.3s\n", ck.clientID, op)
 				time.Sleep(300 * time.Millisecond)
 			}
 			continue
@@ -92,16 +91,16 @@ func (ck *Clerk) CallServer(args Args, reply Reply) {
 			break
 		}
 		if reply.getErr() == ErrCompleted {
-			// fmt.Printf("cl%v %v to src%v already\n", ck.clientID, op, curserver)
+			// DPrintf("cl%v %v to src%v already\n", ck.clientID, op, curserver)
 			break
 		}
 		if reply.getErr() == ErrNoKey || reply.getErr() == ErrTermchanged {
-			// fmt.Printf("cl%v %v to srv%v failed:%v\n", ck.clientID, op, curserver, reply.Err)
+			// DPrintf("cl%v %v to srv%v failed:%v\n", ck.clientID, op, curserver, reply.Err)
 			continue
 		}
 	}
 	if leader != curserver {
 		ck.leaderID = curserver
-		// fmt.Printf("cl%v update leaderID to %v\n", ck.clientID, ck.leaderID)
+		// DPrintf("cl%v update leaderID to %v\n", ck.clientID, ck.leaderID)
 	}
 }

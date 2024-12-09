@@ -2,6 +2,15 @@ package shardctrler
 
 import "fmt"
 
+const Debug = false
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug {
+		fmt.Printf(format, a...)
+	}
+	return
+}
+
 //
 // Shard controller: assigns shards to replication groups.
 //
@@ -97,15 +106,6 @@ type QueryReply struct {
 	ServerID int
 	Err      Err
 	Config   Config
-}
-
-const Debug = false
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug {
-		fmt.Printf(format, a...)
-	}
-	return
 }
 
 type Args interface {
