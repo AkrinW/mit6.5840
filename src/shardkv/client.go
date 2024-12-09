@@ -8,11 +8,14 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
-import "6.5840/shardctrler"
-import "time"
+import (
+	"crypto/rand"
+	"math/big"
+	"time"
+
+	"6.5840/labrpc"
+	"6.5840/shardctrler"
+)
 
 // which shard is a key in?
 // please use this function,
@@ -38,6 +41,8 @@ type Clerk struct {
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	clientID      int64
+	transcationID int
 }
 
 // the tester calls MakeClerk.
@@ -52,6 +57,8 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.clientID = nrand()
+	ck.transcationID = 0
 	return ck
 }
 
@@ -60,65 +67,20 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // keeps trying forever in the face of all other errors.
 // You will have to modify this function.
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{}
-	args.Key = key
-
-	for {
-		shard := key2shard(key)
-		gid := ck.config.Shards[shard]
-		if servers, ok := ck.config.Groups[gid]; ok {
-			// try each server for the shard.
-			for si := 0; si < len(servers); si++ {
-				srv := ck.make_end(servers[si])
-				var reply GetReply
-				ok := srv.Call("ShardKV.Get", &args, &reply)
-				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-					return reply.Value
-				}
-				if ok && (reply.Err == ErrWrongGroup) {
-					break
-				}
-				// ... not ok, or ErrWrongLeader
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-		// ask controller for the latest configuration.
-		ck.config = ck.sm.Query(-1)
-	}
-
-	return ""
+	ck.transcationID++
+	args := KVArgs{ClientID: ck.clientID, TranscationID: ck.transcationID, Type: GET, Key: key}
+	reply := KVReply{}
+	ck.CallServer(&args, &reply)
+	return reply.Value
 }
 
 // shared by Put and Append.
 // You will have to modify this function.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{}
-	args.Key = key
-	args.Value = value
-	args.Op = op
-
-
-	for {
-		shard := key2shard(key)
-		gid := ck.config.Shards[shard]
-		if servers, ok := ck.config.Groups[gid]; ok {
-			for si := 0; si < len(servers); si++ {
-				srv := ck.make_end(servers[si])
-				var reply PutAppendReply
-				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
-				if ok && reply.Err == OK {
-					return
-				}
-				if ok && reply.Err == ErrWrongGroup {
-					break
-				}
-				// ... not ok, or ErrWrongLeader
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-		// ask controller for the latest configuration.
-		ck.config = ck.sm.Query(-1)
-	}
+	ck.transcationID++
+	args := KVArgs{ClientID: ck.clientID, TranscationID: ck.transcationID, Type: op, Key: key, Value: value}
+	reply := KVReply{}
+	ck.CallServer(&args, &reply)
 }
 
 func (ck *Clerk) Put(key string, value string) {
@@ -126,4 +88,38 @@ func (ck *Clerk) Put(key string, value string) {
 }
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
+}
+
+func (ck *Clerk) CallServer(args *KVArgs, reply *KVReply) {
+	shard := key2shard(args.Key)
+	op := args.Type
+	for {
+		gid := ck.config.Shards[shard]
+		if server, ok := ck.config.Groups[gid]; ok {
+			for si := 0; si < len(server); si++ {
+				srv := ck.make_end(server[si])
+				ok := srv.Call("ShardKV."+op, args, reply)
+				if !ok || reply.Err == ErrKilled || reply.Err == ErrWrongLeader {
+					continue
+				}
+				if reply.Err == OK {
+					DPrintf("cl%v %v to srv%v succeed\n", ck.clientID, op, server)
+					return
+				}
+				if reply.Err == ErrCompleted {
+					// fmt.Printf("cl%v %v to src%v already\n", ck.clientID, op, curserver)
+					break
+				}
+				if reply.Err == ErrWrongGroup {
+					break
+				}
+				if reply.Err == ErrNoKey || reply.Err == ErrTermchanged {
+					// fmt.Printf("cl%v %v to srv%v failed:%v\n", ck.clientID, op, curserver, reply.Err)
+					continue
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+		ck.config = ck.sm.Query(-1)
+	}
 }

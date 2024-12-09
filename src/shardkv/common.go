@@ -1,5 +1,16 @@
 package shardkv
 
+import "fmt"
+
+const Debug = true
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug {
+		fmt.Printf(format, a...)
+	}
+	return
+}
+
 //
 // Sharded key/value server.
 // Lots of replica groups, each running Raft.
@@ -14,31 +25,45 @@ const (
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongGroup  = "ErrWrongGroup"
 	ErrWrongLeader = "ErrWrongLeader"
+	ErrKilled      = "ErrKilled"
+	ErrTermchanged = "ErrTermchanged"
+	ErrNotcommit   = "ErrNotcommit"
+	ErrCompleted   = "ErrCompleted"
+)
+
+const (
+	GET    = "Get"
+	PUT    = "Put"
+	APPEND = "Append"
 )
 
 type Err string
 
-// Put or Append
-type PutAppendArgs struct {
-	// You'll have to add definitions here.
-	Key   string
-	Value string
-	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
+type KVArgs struct {
+	ClientID      int64
+	TranscationID int
+	Type          string
+	Key           string
+	Value         string
+}
+
+type KVReply struct {
+	ServerID int
+	Value    string
+	Err      Err
+}
+
+type Op struct {
+	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ClientID      int64
+	TranscationID int
+	Type          string
+	Key           string
+	Value         string
 }
 
-type PutAppendReply struct {
-	Err Err
-}
-
-type GetArgs struct {
-	Key string
-	// You'll have to add definitions here.
-}
-
-type GetReply struct {
-	Err   Err
-	Value string
+type OpShell struct {
+	Operate *Op
 }
