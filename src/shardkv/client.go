@@ -109,7 +109,7 @@ func (ck *Clerk) CallServer(args *KVArgs, reply *KVReply) {
 				}
 				if reply.Err == ErrCompleted {
 					// fmt.Printf("cl%v %v to src%v already\n", ck.clientID, op, curserver)
-					break
+					return
 				}
 				if reply.Err == ErrWrongGroup {
 					break
