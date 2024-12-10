@@ -31,18 +31,19 @@ func DFatal(format string, a ...interface{}) (n int, err error) {
 //
 
 const (
-	OK                 = "OK"
-	ErrNoKey           = "ErrNoKey"
-	ErrWrongGroup      = "ErrWrongGroup"
-	ErrWrongLeader     = "ErrWrongLeader"
-	ErrKilled          = "ErrKilled"
-	ErrTermchanged     = "ErrTermchanged"
-	ErrNotcommit       = "ErrNotcommit"
-	ErrCompleted       = "ErrCompleted"
-	ErrNotReady        = "ErrNotReady"
-	YES                = "Y"
-	NO                 = "N"
-	ErrSyncDBCompleted = "ErrSyncDBCompleted"
+	OK                    = "OK"
+	ErrNoKey              = "ErrNoKey"
+	ErrWrongGroup         = "ErrWrongGroup"
+	ErrWrongLeader        = "ErrWrongLeader"
+	ErrKilled             = "ErrKilled"
+	ErrTermchanged        = "ErrTermchanged"
+	ErrNotcommit          = "ErrNotcommit"
+	ErrCompleted          = "ErrCompleted"
+	ErrNotReady           = "ErrNotReady"
+	YES                   = "Y"
+	NO                    = "N"
+	ErrSyncDBCompleted    = "ErrSyncDBCompleted"
+	ErrWaitAgreeCompleted = "ErrWaitAgreeCompleted"
 )
 
 const (
@@ -60,6 +61,7 @@ const (
 	WAITSYNC          = 2
 	SENDSYNCWAITAGREE = 3 // 两种sendsync状态，用于让group内部一致
 	SENDSYNC          = 4
+	SENDSYNCWAITFIN   = 5
 )
 
 type Err string
@@ -89,6 +91,7 @@ type Op struct {
 	Shard         int
 	Key           string
 	Value         string
+	Sendto        int
 	DB            map[string]string
 	HisTran       map[int64]int
 }

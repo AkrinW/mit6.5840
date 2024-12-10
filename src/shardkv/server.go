@@ -34,12 +34,13 @@ type ShardKV struct {
 	sm             *shardctrler.Clerk
 	serverID       int64
 	transcationID  int
+	shardSendto    []int
 }
 
 func (kv *ShardKV) Get(args *KVArgs, reply *KVReply) {
 	// Your code here.
 	// DPrintf("srv%v reci %v's Get[%v] Trans:%v\n", kv.me, args.ClientID, args.Key, args.TranscationID)
-	command := Op{args.ClientID, args.TranscationID, args.Type, args.Shard, args.Key, args.Value, nil, nil}
+	command := Op{ClientID: args.ClientID, TranscationID: args.TranscationID, Type: args.Type, Shard: args.Shard, Key: args.Key}
 	reply.Value, reply.Err = kv.submitCommand(&command)
 
 	reply.ServerID = kv.me
@@ -52,7 +53,7 @@ func (kv *ShardKV) Get(args *KVArgs, reply *KVReply) {
 func (kv *ShardKV) Put(args *KVArgs, reply *KVReply) {
 	// Your code here.
 	// DPrintf("srv%v reci %v's Put[%v]=%v Trans:%v\n", kv.me, args.ClientID, args.Key, args.Value, args.TranscationID)
-	command := Op{args.ClientID, args.TranscationID, args.Type, args.Shard, args.Key, args.Value, nil, nil}
+	command := Op{ClientID: args.ClientID, TranscationID: args.TranscationID, Type: args.Type, Shard: args.Shard, Key: args.Key, Value: args.Value}
 	_, reply.Err = kv.submitCommand(&command)
 
 	reply.ServerID = kv.me
@@ -64,7 +65,7 @@ func (kv *ShardKV) Put(args *KVArgs, reply *KVReply) {
 
 func (kv *ShardKV) Append(args *KVArgs, reply *KVReply) {
 	// DPrintf("srv%v reci %v's Append[%v]+%v Trans:%v\n", kv.me, args.ClientID, args.Key, args.Value, args.TranscationID)
-	command := Op{args.ClientID, args.TranscationID, args.Type, args.Shard, args.Key, args.Value, nil, nil}
+	command := Op{ClientID: args.ClientID, TranscationID: args.TranscationID, Type: args.Type, Shard: args.Shard, Key: args.Key, Value: args.Value}
 	_, reply.Err = kv.submitCommand(&command)
 
 	reply.ServerID = kv.me
@@ -196,30 +197,22 @@ func (kv *ShardKV) applyCommand(index int, cmd *Op) {
 		case APPEND:
 			kv.DataBase[cmd.Shard][cmd.Key] += cmd.Value
 		case SYNC:
-			if kv.shardStatus[cmd.Shard] == RESPONSIBLE || kv.shardStatus[cmd.Shard] == SENDSYNCWAITAGREE {
-				kv.shardStatus[cmd.Shard] = SENDSYNC
-			}
+			kv.shardStatus[cmd.Shard] = SENDSYNC
 		case SYNCFIN:
-			if kv.shardStatus[cmd.Shard] == SENDSYNC {
-				kv.shardStatus[cmd.Shard] = NOTRESPONSIBLE
-				delete(kv.DataBase, cmd.Shard)
-				delete(kv.HistoryTran, cmd.Shard)
-				kv.DataBase[cmd.Shard] = make(map[string]string)
-				kv.HistoryTran[cmd.Shard] = make(map[int64]int)
-			}
+			kv.shardStatus[cmd.Shard] = NOTRESPONSIBLE
+			// delete(kv.DataBase, cmd.Shard)
+			// delete(kv.HistoryTran, cmd.Shard)
+			// kv.DataBase[cmd.Shard] = make(map[string]string)
+			// kv.HistoryTran[cmd.Shard] = make(map[int64]int)
 		case SYNCDB:
-			if kv.shardStatus[cmd.Shard] == WAITSYNC || kv.shardStatus[cmd.Shard] == NOTRESPONSIBLE {
-				kv.shardStatus[cmd.Shard] = RESPONSIBLE
-				for k, v := range cmd.DB {
-					kv.DataBase[cmd.Shard][k] = v
-				}
-				for k, v := range cmd.HisTran {
-					kv.HistoryTran[cmd.Shard][k] = v
-				}
-				kv.HistoryTran[cmd.Shard][cmd.ClientID] = cmd.TranscationID
-			} else {
-				DPrintf("kv:%v-%v-%v not waitsync%v\n", kv.gid, kv.me, cmd.Shard, kv.shardStatus[cmd.Shard])
+			for k, v := range cmd.DB {
+				kv.DataBase[cmd.Shard][k] = v
 			}
+			for k, v := range cmd.HisTran {
+				kv.HistoryTran[cmd.Shard][k] = v
+			}
+			kv.HistoryTran[cmd.Shard][cmd.ClientID] = cmd.TranscationID
+			kv.shardStatus[cmd.Shard] = RESPONSIBLE
 		}
 		DPrintf("kv:%v-%v-%v db%v hist%v cfg%v\n", kv.gid, kv.me, cmd.Shard, kv.DataBase[cmd.Shard], kv.HistoryTran[cmd.Shard], kv.CurConfig)
 	}
@@ -345,10 +338,12 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.DataBase = make(map[int]map[string]string)
 	kv.HistoryTran = make(map[int]map[int64]int)
 	kv.shardStatus = make([]int, shardctrler.NShards)
+	kv.shardSendto = make([]int, shardctrler.NShards)
 	for i := 0; i < shardctrler.NShards; i++ {
 		kv.DataBase[i] = make(map[string]string)
 		kv.HistoryTran[i] = make(map[int64]int)
 		kv.shardStatus[i] = NOTRESPONSIBLE
+		kv.shardSendto[i] = -1
 	}
 	kv.CurCommitIndex = 0
 	kv.isLeader = false
@@ -361,10 +356,14 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	go kv.applier(kv.applyCh)
 	go kv.termgetter()
 	go kv.cfggetter()
-
+	go kv.stop()
 	return kv
 }
 
+func (kv *ShardKV) stop() {
+	time.Sleep(5000 * time.Millisecond)
+	DFatal("time out stop\n")
+}
 func (kv *ShardKV) termgetter() {
 	lastterm := 0
 	lastleader := false
@@ -388,6 +387,19 @@ func (kv *ShardKV) cfggetter() {
 	lastnum := 0
 	curconfig := shardctrler.Config{}
 	for !kv.killed() {
+		// 初始化首先获取1号cfg，从而避免初始化错误的问题
+		time.Sleep(100 * time.Millisecond)
+		curconfig = kv.sm.Query(1)
+		kv.rwmu.Lock()
+		kv.CurConfig = curconfig
+		lastnum = curconfig.Num
+		kv.rwmu.Unlock()
+		kv.checkShard()
+		break
+	}
+	DPrintf("me:%v-%v db%v\n histran%v\n shardstatus%v\n cfg%v\n", kv.gid, kv.me, kv.DataBase, kv.HistoryTran, kv.shardStatus, kv.CurConfig)
+
+	for !kv.killed() {
 		time.Sleep(100 * time.Millisecond)
 		curconfig = kv.sm.Query(-1)
 		if lastnum != curconfig.Num {
@@ -399,7 +411,7 @@ func (kv *ShardKV) cfggetter() {
 		}
 		kv.checkShard()
 		// kv.rwmu.RLock()
-		// DPrintf("me:%v-%v db%v histran%v\n", kv.gid, kv.me, kv.DataBase, kv.HistoryTran)
+		DPrintf("me:%v-%v db%v\n histran%v\n shardstatus%v\n cfg%v\n", kv.gid, kv.me, kv.DataBase, kv.HistoryTran, kv.shardStatus, kv.CurConfig)
 		// kv.rwmu.RUnlock()
 	}
 }
@@ -411,41 +423,54 @@ func (kv *ShardKV) checkShard() {
 	kv.rwmu.Lock()
 	defer kv.rwmu.Unlock()
 	for i := 0; i < shardctrler.NShards; i++ {
-		if kv.shardStatus[i] == WAITSYNC || kv.shardStatus[i] == SENDSYNC {
-			// 这个shard还处于传输或等待传输中，先跳过
-			continue
-		}
-		if kv.CurConfig.Shards[i] != kv.gid && kv.shardStatus[i] == RESPONSIBLE {
-			// 处于自己负责的shard,被划分到另外一个group了，需要进行同步
-			// 先启动一个goroutine让自己group内的集群同步
-			kv.shardStatus[i] = SENDSYNCWAITAGREE
-			go kv.startsendsync(i, kv.CurConfig)
-		}
-		if kv.CurConfig.Shards[i] == kv.gid && kv.shardStatus[i] == NOTRESPONSIBLE {
-			// 不属于自己负责shard,获取了新的shard,需要先从前一个group获取data信息
-			// 如果是初始化的情况，前一任就是未分配的0，这时候可以直接开始事务处理
-			// 但是如果跳过了cfg[1]的话就会错误地提前启动造成bug。
-			// if kv.CurConfig.Num == 0 && cur.Num != 1 {
-			// DFatal("Error:Skip Config[1]\n")
-			// } else if cur.Num == 1 {
-			// 初始化的情况，可以直接开始服务
-			if kv.CurConfig.Num == 2 || kv.CurConfig.Num == 1 {
-				kv.shardStatus[i] = RESPONSIBLE
-			} else {
-				kv.shardStatus[i] = WAITSYNC
+		// 这里需要根据的状态发送任务，而不能先看shard的状态
+		if kv.shardStatus[i] == RESPONSIBLE {
+			if kv.CurConfig.Shards[i] != kv.gid {
+				kv.shardStatus[i] = SENDSYNCWAITAGREE
+				kv.shardSendto[i] = kv.CurConfig.Shards[i]
+				if kv.isLeader {
+					go kv.startsendsync(i, kv.shardSendto[i])
+				}
 			}
+		} else if kv.shardStatus[i] == SENDSYNCWAITAGREE {
+			// 避免失联于是检查是leader就发送信息
+			if kv.isLeader {
+				go kv.startsendsyncagree(i, kv.shardSendto[i])
+			}
+		} else if kv.shardStatus[i] == SENDSYNC {
+			if kv.isLeader {
+				go kv.startsendsync(i, kv.shardSendto[i])
+			}
+		} else if kv.shardStatus[i] == SENDSYNCWAITFIN {
+			if kv.isLeader {
+				go kv.startsendsyncfin(i)
+			}
+		} else if kv.shardStatus[i] == NOTRESPONSIBLE {
+			if kv.CurConfig.Shards[i] == kv.gid {
+				if kv.CurConfig.Num == 1 {
+					kv.shardStatus[i] = RESPONSIBLE
+				} else {
+					kv.shardStatus[i] = WAITSYNC
+				}
+			}
+		} else { // kv.shardStatus[i] == WAITSYNC, do nothing
+
 		}
-		// 剩余的情形不需要考虑
 	}
 }
 
-func (kv *ShardKV) startsendsync(shard int, cur shardctrler.Config) {
+func (kv *ShardKV) startsendsyncagree(shard int, sentto int) {
+	// leader先向group内部进行同步。
 	// 对于某个需要同步的shard，首先提交到raft层，让group内部达成一致
 	// 提交的command只需要类型与shard编号即可
 	// 同步时，已经在本机提交的trans保留执行，执行完成后再把db和记录发送出去
 	kv.rwmu.Lock()
+	if kv.shardStatus[shard] != SENDSYNCWAITAGREE {
+		kv.rwmu.Unlock()
+		return
+	}
 	kv.transcationID++
-	command := Op{ClientID: kv.serverID, TranscationID: kv.transcationID, Type: SYNC, Shard: shard}
+	command := Op{ClientID: kv.serverID, TranscationID: kv.transcationID, Type: SYNC, Shard: shard, Sendto: sentto}
 	kv.rwmu.Unlock()
 	flag := true
 	for flag {
@@ -453,19 +478,38 @@ func (kv *ShardKV) startsendsync(shard int, cur shardctrler.Config) {
 		// kv层的server不知道raft层是否存在leader,所以必须要多次尝试
 		DPrintf("Try Sync shard%v In Group%v-%v\n", shard, kv.gid, kv.me)
 		NeedReTry, Err := kv.submitSync(&command) // 还是和client区分开用另一个函数写方便一些
-		if Err == OK || NeedReTry == NO {
-			flag = false
+		if NeedReTry == NO {
+			break
 		}
-		// 由于有循环检测，所以只让leader进行submit了
-		// 如果出现新的leader,在循环检测的时候它就会进行submitsync
-		if Err == ErrSyncDBCompleted {
+		switch Err {
+		case OK:
+			flag = false
+		case ErrKilled:
+			return
+		case ErrTermchanged:
+		case ErrWrongLeader:
+			return
+		case ErrSyncDBCompleted:
+			return
+		case ErrCompleted:
+			flag = false
+		case ErrNotcommit:
+		}
+		if Err == ErrKilled {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	go kv.startsendsync(shard, sentto)
+}
 
+func (kv *ShardKV) startsendsync(shard int, sentto int) {
 	// 认为同步完成，开始向目标shard发送db和cl
 	kv.rwmu.RLock()
+	if kv.shardStatus[shard] != SENDSYNC {
+		kv.rwmu.RUnlock()
+		return
+	}
 	db := make(map[string]string)
 	hist := make(map[int64]int)
 	for k, v := range kv.HistoryTran[shard] {
@@ -477,61 +521,84 @@ func (kv *ShardKV) startsendsync(shard int, cur shardctrler.Config) {
 	// DPrintf("kvhist%v send%v kvdb%v db%v\n", kv.HistoryTran[shard], hist, kv.DataBase[shard], db)
 	args := SyncDBArgs{kv.serverID, shard, db, hist}
 	reply := SyncDBReply{}
+	group := kv.CurConfig.Groups[sentto]
 	kv.rwmu.RUnlock()
 
 	// 在这一部分 3对3都发送syncdb,目标是让对方至少一半成功同步db
 	// 在对方返回成功信息后,需要把成功信息也至少发送给一半原server
 	// 有可能出现返回的leader被屏蔽后丢失command，导致原group一直处于send状态
-	flag = true
+	flag := true
 	for flag {
-		gid := cur.Shards[shard]
-		if server, ok := cur.Groups[gid]; ok {
-			for si := 0; si < len(server); si++ {
-				srv := kv.make_end(server[si])
-				ok := srv.Call("ShardKV.SyncDB", &args, &reply)
-				if !ok || reply.Err == ErrKilled || reply.Err == ErrWrongLeader {
-					continue
-				}
-				if reply.Err == OK {
-					DPrintf("%v-%v send%v to %v-%v succeed\n", kv.gid, kv.me, shard, gid, si)
-					flag = false
-					break
-				}
-				if reply.Err == ErrCompleted {
-					// fmt.Printf("cl%v %v to src%v already\n", ck.clientID, op, curserver)
-					flag = false
-					break
-				}
-				if reply.Err == ErrWrongGroup {
-					break
-				}
-				if reply.Err == ErrNoKey || reply.Err == ErrTermchanged {
-					// fmt.Printf("cl%v %v to srv%v failed:%v\n", ck.clientID, op, curserver, reply.Err)
-					continue
-				}
+		for si := 0; si < len(group); si++ {
+			srv := kv.make_end(group[si])
+			ok := srv.Call("ShardKV.SyncDB", &args, &reply)
+			if !ok || reply.Err == ErrKilled || reply.Err == ErrWrongLeader {
+				continue
+			}
+			if reply.Err == OK {
+				DPrintf("%v-%v send%v to %v-%v succeed\n", kv.gid, kv.me, shard, sentto, si)
+				flag = false
+				break
+			}
+			if reply.Err == ErrCompleted {
+				// fmt.Printf("cl%v %v to src%v already\n", ck.clientID, op, curserver)
+				flag = false
+				break
+			}
+			if reply.Err == ErrWrongGroup {
+				return
+			}
+			if reply.Err == ErrNoKey || reply.Err == ErrTermchanged {
+				// fmt.Printf("cl%v %v to srv%v failed:%v\n", ck.clientID, op, curserver, reply.Err)
+				continue
 			}
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 
+	kv.rwmu.Lock()
+	kv.shardStatus[shard] = SENDSYNCWAITFIN
+	go kv.startsendsyncfin(shard)
+	kv.rwmu.Unlock()
+}
+
+func (kv *ShardKV) startsendsyncfin(shard int) {
 	// 收到成功的消息，对自己的server进行同步完成的消息
 	kv.rwmu.Lock()
+	if kv.shardStatus[shard] != SENDSYNCWAITFIN {
+		kv.rwmu.Unlock()
+		return
+	}
 	kv.transcationID++
-	command2 := Op{ClientID: kv.serverID, TranscationID: kv.transcationID, Type: SYNCFIN, Shard: shard}
+	command := Op{ClientID: kv.serverID, TranscationID: kv.transcationID, Type: SYNCFIN, Shard: shard}
 	kv.rwmu.Unlock()
-	flag = true
+	flag := true
 	for flag {
 		// 采用循环的模式执行，因为担心raft层恰好无leader导致command提交失败
 		// kv层的server不知道raft层是否存在leader,所以必须要多次尝试
 		DPrintf("Try Syncfin shard%v In Group%v-%v\n", shard, kv.gid, kv.me)
-		NeedReTry, Err := kv.submitSync(&command2) // 还是和client区分开用另一个函数写方便一些
-		if Err == OK || NeedReTry == NO {
-			flag = false
+		NeedReTry, Err := kv.submitSync(&command) // 还是和client区分开用另一个函数写方便一些
+		if NeedReTry == NO {
+			break
 		}
-		if Err == ErrSyncDBCompleted {
+		switch Err {
+		case OK:
+			flag = false
+		case ErrKilled:
+			return
+		case ErrTermchanged:
+		case ErrWrongLeader:
+			return
+		case ErrSyncDBCompleted:
+			return
+		case ErrCompleted:
+			flag = false
+		case ErrNotcommit:
+		}
+		if Err == ErrKilled {
 			return
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -545,7 +612,7 @@ func (kv *ShardKV) submitSync(cmd *Op) (string, Err) {
 		needretry = NO
 		kv.rwmu.RUnlock()
 		return needretry, err
-	} else if kv.shardStatus[cmd.Shard] != SENDSYNC && cmd.Type == SYNCFIN {
+	} else if kv.shardStatus[cmd.Shard] != SENDSYNCWAITFIN && cmd.Type == SYNCFIN {
 		err = ErrCompleted
 		needretry = NO
 		kv.rwmu.RUnlock()

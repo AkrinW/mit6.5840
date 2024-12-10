@@ -1,15 +1,18 @@
 package shardkv
 
-import "6.5840/porcupine"
-import "6.5840/models"
-import "testing"
-import "strconv"
-import "time"
-import "fmt"
-import "sync/atomic"
-import "sync"
-import "math/rand"
-import "io/ioutil"
+import (
+	"fmt"
+	"io/ioutil"
+	"math/rand"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"6.5840/models"
+	"6.5840/porcupine"
+)
 
 const linearizabilityCheckTimeout = 1 * time.Second
 
@@ -43,7 +46,7 @@ func TestStaticShards5A(t *testing.T) {
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
-
+	fmt.Printf("SHART ONE GROUP\n")
 	// make sure that the data really is sharded by
 	// shutting down one shard and checking that some
 	// Get()s don't succeed.
@@ -83,6 +86,7 @@ func TestStaticShards5A(t *testing.T) {
 		t.Fatalf("expected %v completions with one shard dead; got %v\n",
 			n/2, ndone)
 	}
+	fmt.Printf("Reconnect ONE GROUP\n")
 
 	// bring the crashed shard/group back to life.
 	cfg.StartGroup(1)
