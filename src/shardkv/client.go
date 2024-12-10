@@ -114,6 +114,9 @@ func (ck *Clerk) CallServer(args *KVArgs, reply *KVReply) {
 				if reply.Err == ErrWrongGroup {
 					break
 				}
+				if reply.Err == ErrNotReady {
+					time.Sleep(100 * time.Millisecond)
+				}
 				if reply.Err == ErrNoKey || reply.Err == ErrTermchanged {
 					// fmt.Printf("cl%v %v to srv%v failed:%v\n", ck.clientID, op, curserver, reply.Err)
 					continue

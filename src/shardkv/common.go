@@ -39,6 +39,7 @@ const (
 	ErrTermchanged     = "ErrTermchanged"
 	ErrNotcommit       = "ErrNotcommit"
 	ErrCompleted       = "ErrCompleted"
+	ErrNotReady        = "ErrNotReady"
 	YES                = "Y"
 	NO                 = "N"
 	ErrSyncDBCompleted = "ErrSyncDBCompleted"
@@ -50,6 +51,7 @@ const (
 	APPEND  = "Append"
 	SYNC    = "Sync"
 	SYNCFIN = "Syncfin"
+	SYNCDB  = "SyncDB"
 )
 
 const (
@@ -84,9 +86,11 @@ type Op struct {
 	ClientID      int64
 	TranscationID int
 	Type          string
-	Key           string
 	Shard         int
+	Key           string
 	Value         string
+	DB            map[string]string
+	HisTran       map[int64]int
 }
 
 type OpShell struct {
