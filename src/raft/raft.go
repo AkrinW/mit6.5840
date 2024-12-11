@@ -20,6 +20,7 @@ package raft
 import (
 	//	"bytes"
 
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -89,6 +90,10 @@ type Raft struct {
 	snapshot      *Snapshot
 	snapoffset    int    // 用来记录snapshot的偏移量
 	ininstallsnap []bool //用来记录某个server是否正在下载snapshot
+}
+
+func (rf *Raft) PrintLog() {
+	fmt.Printf("me:%v logs:%v\n", rf.me, rf.logs)
 }
 
 func ResetTimer(t *time.Timer, a int32, b int32) {

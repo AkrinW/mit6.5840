@@ -44,6 +44,8 @@ const (
 	NO                    = "N"
 	ErrSyncDBCompleted    = "ErrSyncDBCompleted"
 	ErrWaitAgreeCompleted = "ErrWaitAgreeCompleted"
+	ErrHoldDB             = "ErrHoldDB"
+	ErrSendingDB          = "ErrSendingDB"
 )
 
 const (
@@ -53,15 +55,16 @@ const (
 	SYNC    = "Sync"
 	SYNCFIN = "Syncfin"
 	SYNCDB  = "SyncDB"
+	START   = "Start"
 )
 
 const (
-	NOTRESPONSIBLE    = 0
-	RESPONSIBLE       = 1
-	WAITSYNC          = 2
-	SENDSYNCWAITAGREE = 3 // 两种sendsync状态，用于让group内部一致
-	SENDSYNC          = 4
-	SENDSYNCWAITFIN   = 5
+	NOTRESPONSIBLE = 0
+	RESPONSIBLE    = 1
+	WAITSYNC       = 2
+	// SENDSYNCWAITAGREE = 3 // 两种sendsync状态，用于让group内部一致
+	SENDSYNC = 4
+	// SENDSYNCWAITFIN   = 5
 )
 
 type Err string
@@ -108,6 +111,16 @@ type SyncDBArgs struct {
 }
 
 type SyncDBReply struct {
+	ServerID int64
+	Err      Err
+}
+
+type AskDBArgs struct {
+	ServerID int64
+	Shard    int
+}
+
+type AskDBReply struct {
 	ServerID int64
 	Err      Err
 }
