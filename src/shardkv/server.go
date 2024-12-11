@@ -217,10 +217,10 @@ func (kv *ShardKV) applyCommand(index int, cmd *Op) {
 		if kv.shardStatus[cmd.Shard] == SENDSYNC {
 			kv.shardStatus[cmd.Shard] = NOTRESPONSIBLE
 			kv.shardSendto[cmd.Shard] = -1
-			// delete(kv.DataBase, cmd.Shard)
-			// delete(kv.HistoryTran, cmd.Shard)
-			// kv.DataBase[cmd.Shard] = make(map[string]string)
-			// kv.HistoryTran[cmd.Shard] = make(map[int64]int)
+			delete(kv.DataBase, cmd.Shard)
+			delete(kv.HistoryTran, cmd.Shard)
+			kv.DataBase[cmd.Shard] = make(map[string]string)
+			kv.HistoryTran[cmd.Shard] = make(map[int64]int)
 		}
 	case SYNCDB:
 		if kv.shardStatus[cmd.Shard] == NOTRESPONSIBLE {
@@ -239,6 +239,7 @@ func (kv *ShardKV) applyCommand(index int, cmd *Op) {
 			kv.shardStatus[i] = RESPONSIBLE
 		}
 	case EMPTY:
+		DPrintf("%v-%v empty\n", kv.gid, kv.me)
 	}
 	DPrintf("kv:%v-%v-%v db%v\n hist%v\n shardstatus%v\n", kv.gid, kv.me, cmd.Shard, kv.DataBase[cmd.Shard], kv.HistoryTran[cmd.Shard], kv.shardStatus)
 
@@ -294,7 +295,9 @@ func (kv *ShardKV) applyCommand(index int, cmd *Op) {
 			e.Encode(kv.DataBase)
 			e.Encode(kv.HistoryTran)
 			e.Encode(kv.shardStatus)
-			e.Encode(kv.CurConfig)
+			e.Encode(kv.shardSendto)
+			e.Encode(kv.shardSendRecord)
+			// e.Encode(kv.CurConfig)
 			kv.rf.Snapshot(index, w.Bytes())
 		}
 	}
@@ -325,10 +328,20 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 		return
 	}
 
-	if err := d.Decode(&kv.CurConfig); err != nil {
-		DPrintf("me:%v Read curcfg error:%v\n", kv.me, err)
+	if err := d.Decode(&kv.shardSendto); err != nil {
+		DPrintf("me:%v Read shardstatus error:%v\n", kv.me, err)
 		return
 	}
+
+	if err := d.Decode(&kv.shardSendRecord); err != nil {
+		DPrintf("me:%v Read shardstatus error:%v\n", kv.me, err)
+		return
+	}
+
+	// if err := d.Decode(&kv.CurConfig); err != nil {
+	// 	DPrintf("me:%v Read curcfg error:%v\n", kv.me, err)
+	// 	return
+	// }
 }
 
 func (kv *ShardKV) applySnapshot(index int, term int, data []byte) {
@@ -454,7 +467,7 @@ func (kv *ShardKV) commitemptylog() {
 }
 
 func (kv *ShardKV) stop() {
-	time.Sleep(10 * time.Second)
+	time.Sleep(15 * time.Second)
 	DFatal("time out stop\n")
 }
 
@@ -543,6 +556,7 @@ func (kv *ShardKV) cfggetter() {
 			kv.rwmu.Unlock()
 		}
 		kv.checkShard(curconfig)
+		DPrintf("%v-%v cfg:%v\n", kv.gid, kv.me, curconfig)
 		// kv.rwmu.RLock()
 		// DPrintf("me:%v-%v db%v\n histran%v\n shardstatus%v\n cfg%v\n", kv.gid, kv.me, kv.DataBase, kv.HistoryTran, kv.shardStatus, kv.CurConfig)
 		// kv.rwmu.RUnlock()
@@ -556,17 +570,19 @@ func (kv *ShardKV) checkshardcfg1(cfg shardctrler.Config) {
 }
 
 func (kv *ShardKV) startcfg1() {
-	kv.rwmu.Lock()
+	kv.rwmu.RLock()
 	if !kv.isLeader {
+		kv.rwmu.RUnlock()
 		return
 	}
 	if kv.shardStatus[0] != NOTRESPONSIBLE {
+		kv.rwmu.RUnlock()
 		return
 	}
 	cmd := Op{ClientID: kv.serverID, Type: START}
 	cmdshell := OpShell{&cmd}
 	cmdindex, term, isLeader := kv.rf.Start(cmdshell)
-	kv.rwmu.Unlock()
+	kv.rwmu.RUnlock()
 	if !isLeader {
 		return
 	}
@@ -886,7 +902,7 @@ func (kv *ShardKV) SyncDB(args *SyncDBArgs, reply *SyncDBReply) {
 		return
 	}
 	if kv.shardSendRecord[args.Shard] >= args.Record {
-		DPrintf("%v-%v reci db is old,ignore\n", kv.gid, kv.me)
+		DPrintf("%v-%v reci db is old%v %v,ignore\n", kv.gid, kv.me, kv.shardSendRecord[args.Shard], args.Record)
 		reply.Err = ErrCompleted
 		kv.rwmu.RUnlock()
 		return
