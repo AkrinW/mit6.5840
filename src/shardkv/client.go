@@ -99,6 +99,7 @@ func (ck *Clerk) CallServer(args *KVArgs, reply *KVReply) {
 		if server, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(server); si++ {
 				srv := ck.make_end(server[si])
+				DPrintf("me:%v send to %v-%v-%v\n", ck.clientID, gid, si, shard)
 				ok := srv.Call("ShardKV."+op, args, reply)
 				if !ok || reply.Err == ErrKilled || reply.Err == ErrWrongLeader {
 					continue
@@ -108,7 +109,7 @@ func (ck *Clerk) CallServer(args *KVArgs, reply *KVReply) {
 					return
 				}
 				if reply.Err == ErrCompleted {
-					// fmt.Printf("cl%v %v to src%v already\n", ck.clientID, op, curserver)
+					DPrintf("cl%v %v to src%v already\n", ck.clientID, op, server[si])
 					return
 				}
 				if reply.Err == ErrWrongGroup {

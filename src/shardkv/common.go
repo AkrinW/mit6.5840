@@ -56,6 +56,7 @@ const (
 	SYNCFIN = "Syncfin"
 	SYNCDB  = "SyncDB"
 	START   = "Start"
+	EMPTY   = "Empty"
 )
 
 const (
@@ -88,15 +89,15 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	ClientID      int64
-	TranscationID int
-	Type          string
-	Shard         int
-	Key           string
-	Value         string
-	Sendto        int
-	DB            map[string]string
-	HisTran       map[int64]int
+	ClientID        int64
+	TranscationID   int
+	Type            string
+	Shard           int
+	Key             string
+	Value           string
+	SendtoAndRecord int // 两个指令公用一个int变量存储，因为不会同时用到
+	DB              map[string]string
+	HisTran         map[int64]int
 }
 
 type OpShell struct {
@@ -108,6 +109,7 @@ type SyncDBArgs struct {
 	Shard    int
 	DB       map[string]string
 	HisTran  map[int64]int
+	Record   int
 }
 
 type SyncDBReply struct {

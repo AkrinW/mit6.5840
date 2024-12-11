@@ -16,15 +16,16 @@ if ! [[ "$iterations" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-output_file="output-$test_type.txt"  # 定义结果保存的文件名
-> "$output_file"  # 清空或创建 output 文件
-
-# 将完整的测试命令写入文件
-echo "time go test -failfast -run $test_type" >> "$output_file"
 
 # 迭代执行测试
 for ((i=1; i<=iterations; i++))
 do
+  output_file="output-$test_type-$i.txt"  # 定义结果保存的文件名
+  > "$output_file"  # 清空或创建 output 文件
+
+  # 将完整的测试命令写入文件
+  echo "time go test -failfast -run $test_type" >> "$output_file"
+
   echo "Running test iteration $i" >> "$output_file"
   
   # 执行完整命令并捕获输出和状态

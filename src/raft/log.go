@@ -78,7 +78,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	rf.nextIndex = index + 1
 	rf.persist()
-	DPrintf("me:%v append log%v, term%v, index%v\n", rf.me, command, term, index)
+	DPrintf("me:%v append log%v, term%v, index%v, match%v\n", rf.me, command, term, index, rf.matchIndex)
 
 	// 在4A speedtest要求commit速度高于heartbeat的频率，别无他法只能在start的时候发送一次heartbeat
 	for i := 0; i < rf.serverNum; i++ {
