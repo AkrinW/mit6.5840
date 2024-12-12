@@ -291,7 +291,7 @@ func (kv *ShardKV) applyCommand(index int, cmd *Op) {
 	// }
 
 	if kv.maxraftstate > 0 {
-		if (index+1)%30 == 0 {
+		if (index+1)%15 == 0 {
 			DPrintf("me:%v call snapshot\n", kv.me)
 			w := new(bytes.Buffer)
 			e := labgob.NewEncoder(w)
@@ -477,7 +477,7 @@ func (kv *ShardKV) commitemptylog() {
 }
 
 func (kv *ShardKV) stop() {
-	time.Sleep(30 * time.Second)
+	time.Sleep(300 * time.Second)
 	DFatal("time out stop\n")
 }
 
