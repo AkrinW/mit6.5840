@@ -36,6 +36,7 @@ type ShardKV struct {
 	serverID        int64
 	shardSendto     []int
 	shardSendRecord []int
+	ifstart         bool // 用标志记录，避免重启执行2次start
 }
 
 func (kv *ShardKV) Get(args *KVArgs, reply *KVReply) {
@@ -234,9 +235,12 @@ func (kv *ShardKV) applyCommand(index int, cmd *Op) {
 			kv.shardSendRecord[cmd.Shard] = cmd.SendtoAndRecord
 		}
 	case START:
-		DPrintf("%v-%vcmd:%v\n", kv.gid, kv.me, cmd)
-		for i := 0; i < shardctrler.NShards; i++ {
-			kv.shardStatus[i] = RESPONSIBLE
+		if !kv.ifstart {
+			kv.ifstart = true
+			DPrintf("%v-%vcmd:%v\n", kv.gid, kv.me, cmd)
+			for i := 0; i < shardctrler.NShards; i++ {
+				kv.shardStatus[i] = RESPONSIBLE
+			}
 		}
 	case EMPTY:
 		DPrintf("%v-%v empty\n", kv.gid, kv.me)
@@ -297,6 +301,7 @@ func (kv *ShardKV) applyCommand(index int, cmd *Op) {
 			e.Encode(kv.shardStatus)
 			e.Encode(kv.shardSendto)
 			e.Encode(kv.shardSendRecord)
+			e.Encode(kv.ifstart)
 			// e.Encode(kv.CurConfig)
 			kv.rf.Snapshot(index, w.Bytes())
 		}
@@ -334,6 +339,11 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 	}
 
 	if err := d.Decode(&kv.shardSendRecord); err != nil {
+		DPrintf("me:%v Read shardstatus error:%v\n", kv.me, err)
+		return
+	}
+
+	if err := d.Decode(&kv.ifstart); err != nil {
 		DPrintf("me:%v Read shardstatus error:%v\n", kv.me, err)
 		return
 	}
@@ -434,6 +444,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.isLeader = false
 	kv.CurTerm = 0
 	kv.serverID = nrand()
+	kv.ifstart = false
 
 	kv.readSnapshot(persister.ReadSnapshot())
 	// kv重启后，logs里面存储了原本的状态，进行更新就能够恢复。
@@ -599,7 +610,7 @@ func (kv *ShardKV) startcfg1() {
 		}
 		// DPrintf("kv:%v curcomit%v cmdindex%v\n", kv.me, kv.CurCommitIndex, cmdindex)
 		if kv.CurCommitIndex >= cmdindex {
-			if kv.shardStatus[0] == RESPONSIBLE {
+			if kv.ifstart {
 				DPrintf("%v-%v START succeed\n", kv.gid, kv.me)
 			} else {
 				DPrintf("cmd%v index%v not commit\n", cmd, cmdindex)
